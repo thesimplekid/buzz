@@ -19,8 +19,8 @@
 //!
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -43,6 +43,46 @@ use crate::relay::{ChannelInfo, RestClient};
 // ── FlushBatch Clone note ─────────────────────────────────────────────────────
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
+
+/// Maximum recent channel messages retained per channel for passive context.
+pub const CHANNEL_CONTEXT_LIMIT: usize = 50;
+
+/// Bounded live channel context captured from relay traffic.
+#[derive(Default)]
+pub struct ChannelContextBuffer {
+    events: Mutex<HashMap<Uuid, VecDeque<nostr::Event>>>,
+}
+
+impl ChannelContextBuffer {
+    pub fn record(&self, channel_id: Uuid, event: &nostr::Event) {
+        let Ok(mut events) = self.events.lock() else {
+            return;
+        };
+        let channel_events = events.entry(channel_id).or_default();
+        if channel_events
+            .back()
+            .is_some_and(|existing| existing.id == event.id)
+        {
+            return;
+        }
+        channel_events.push_back(event.clone());
+        while channel_events.len() > CHANNEL_CONTEXT_LIMIT {
+            channel_events.pop_front();
+        }
+    }
+
+    fn snapshot(&self, channel_id: Uuid) -> Vec<nostr::Event> {
+        self.events
+            .lock()
+            .ok()
+            .and_then(|events| {
+                events
+                    .get(&channel_id)
+                    .map(|events| events.iter().cloned().collect())
+            })
+            .unwrap_or_default()
+    }
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -253,6 +293,8 @@ pub struct PromptContext {
     /// `[Agent Memory — core]` section. On by default; disabled via
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
+    /// Bounded recent live channel traffic used as passive context.
+    pub channel_context: Arc<ChannelContextBuffer>,
 }
 
 // ── AgentPool impl ────────────────────────────────────────────────────────────
@@ -1069,9 +1111,15 @@ pub async fn run_prompt_task(
         } else {
             None
         };
+        let channel_context = fetch_channel_context(b, &ctx).await;
 
-        let profile_lookup =
-            fetch_prompt_profile_lookup(b, conversation_context.as_ref(), &ctx.rest_client).await;
+        let profile_lookup = fetch_prompt_profile_lookup(
+            b,
+            channel_context.as_ref(),
+            conversation_context.as_ref(),
+            &ctx.rest_client,
+        )
+        .await;
 
         let known_names: Vec<&str> = profile_lookup
             .iter()
@@ -1094,6 +1142,7 @@ pub async fn run_prompt_task(
             &crate::queue::FormatPromptArgs {
                 agent_core: agent_core.as_deref(),
                 channel_info: channel_info.as_ref(),
+                channel_context: channel_context.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
                 has_system_prompt_support: agent.protocol_version >= 2,
@@ -1567,6 +1616,139 @@ async fn fetch_conversation_context(
     None
 }
 
+/// Fetch recent channel discussion and merge it with the live observe buffer.
+async fn fetch_channel_context(
+    batch: &FlushBatch,
+    ctx: &PromptContext,
+) -> Option<ConversationContext> {
+    use nostr::{Alphabet, SingleLetterTag, Timestamp};
+
+    let last_event = batch.events.last()?;
+    let exclude_ids: HashSet<String> = batch
+        .events
+        .iter()
+        .map(|event| event.event.id.to_hex())
+        .collect();
+
+    let mut messages: HashMap<String, (u64, ContextMessage)> = HashMap::new();
+    for event in ctx.channel_context.snapshot(batch.channel_id) {
+        insert_context_event(&mut messages, &event, &exclude_ids);
+    }
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let ch_str = batch.channel_id.to_string();
+    let filter = nostr::Filter::new()
+        .kinds([
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_V2 as u16),
+        ])
+        .custom_tags(h_tag, [ch_str.as_str()])
+        .until(Timestamp::from(last_event.event.created_at.as_secs()))
+        .limit(CHANNEL_CONTEXT_LIMIT);
+
+    let fetched_json = fetch_with_retry(|| async {
+        match timeout(
+            CONTEXT_FETCH_TIMEOUT,
+            ctx.rest_client.query(std::slice::from_ref(&filter)),
+        )
+        .await
+        {
+            Ok(Ok(json)) => Some(json),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    "channel context fetch failed: {e} — will retry"
+                );
+                None
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    "channel context fetch timed out — will retry"
+                );
+                None
+            }
+        }
+    })
+    .await;
+    let fetched_count = fetched_json
+        .map(|json| merge_nostr_channel_context(&mut messages, json, &exclude_ids))
+        .unwrap_or(0);
+
+    let mut ordered: Vec<(String, u64, ContextMessage)> = messages
+        .into_iter()
+        .map(|(id, (timestamp, message))| (id, timestamp, message))
+        .collect();
+    ordered.sort_by(|(left_id, left_ts, _), (right_id, right_ts, _)| {
+        left_ts.cmp(right_ts).then(left_id.cmp(right_id))
+    });
+    if ordered.len() > CHANNEL_CONTEXT_LIMIT {
+        let drain_count = ordered.len() - CHANNEL_CONTEXT_LIMIT;
+        ordered.drain(..drain_count);
+    }
+
+    let messages: Vec<ContextMessage> =
+        ordered.into_iter().map(|(_, _, message)| message).collect();
+    if messages.is_empty() {
+        return None;
+    }
+
+    let truncated = fetched_count >= CHANNEL_CONTEXT_LIMIT;
+    let total = if truncated {
+        messages.len() + 1
+    } else {
+        messages.len()
+    };
+
+    Some(ConversationContext::Channel {
+        messages,
+        total,
+        truncated,
+    })
+}
+
+fn merge_nostr_channel_context(
+    messages: &mut HashMap<String, (u64, ContextMessage)>,
+    json: serde_json::Value,
+    exclude_ids: &HashSet<String>,
+) -> usize {
+    let Some(events) = json.as_array() else {
+        return 0;
+    };
+    for value in events {
+        if let Ok(event) = serde_json::from_value::<nostr::Event>(value.clone()) {
+            insert_context_event(messages, &event, exclude_ids);
+        }
+    }
+    events.len()
+}
+
+fn insert_context_event(
+    messages: &mut HashMap<String, (u64, ContextMessage)>,
+    event: &nostr::Event,
+    exclude_ids: &HashSet<String>,
+) {
+    let event_id = event.id.to_hex();
+    if exclude_ids.contains(&event_id) {
+        return;
+    }
+    messages
+        .entry(event_id)
+        .or_insert_with(|| (event.created_at.as_secs(), event_to_context_message(event)));
+}
+
+fn event_to_context_message(event: &nostr::Event) -> ContextMessage {
+    let timestamp = chrono::DateTime::from_timestamp(event.created_at.as_secs() as i64, 0)
+        .map(|dt| dt.to_rfc3339())
+        .unwrap_or_else(|| event.created_at.as_secs().to_string());
+
+    ContextMessage {
+        pubkey: event.pubkey.to_hex(),
+        timestamp,
+        content: event.content.clone(),
+    }
+}
+
 /// Normalize AND validate a pubkey for the batch profile API request.
 /// Returns `None` for malformed input — only valid 64-char hex passes.
 /// See also: `normalize_lookup_key` in queue.rs (normalize-only, no validation).
@@ -1581,6 +1763,7 @@ fn normalize_prompt_pubkey(pubkey: &str) -> Option<String> {
 
 fn collect_prompt_pubkeys(
     batch: &FlushBatch,
+    channel_context: Option<&ConversationContext>,
     conversation_context: Option<&ConversationContext>,
 ) -> Vec<String> {
     let mut pubkeys = HashSet::new();
@@ -1595,13 +1778,15 @@ fn collect_prompt_pubkeys(
         }
     }
 
-    let context_messages = match conversation_context {
-        Some(ConversationContext::Thread { messages, .. })
-        | Some(ConversationContext::Dm { messages, .. }) => Some(messages),
-        None => None,
-    };
-
-    if let Some(messages) = context_messages {
+    for context in [channel_context, conversation_context]
+        .into_iter()
+        .flatten()
+    {
+        let messages = match context {
+            ConversationContext::Channel { messages, .. }
+            | ConversationContext::Thread { messages, .. }
+            | ConversationContext::Dm { messages, .. } => messages,
+        };
         for message in messages {
             if let Some(normalized) = normalize_prompt_pubkey(&message.pubkey) {
                 pubkeys.insert(normalized);
@@ -1656,10 +1841,11 @@ fn parse_kind0_profile_lookup(json: serde_json::Value) -> Option<PromptProfileLo
 
 async fn fetch_prompt_profile_lookup(
     batch: &FlushBatch,
+    channel_context: Option<&ConversationContext>,
     conversation_context: Option<&ConversationContext>,
     rest: &RestClient,
 ) -> Option<PromptProfileLookup> {
-    let pubkeys = collect_prompt_pubkeys(batch, conversation_context);
+    let pubkeys = collect_prompt_pubkeys(batch, channel_context, conversation_context);
     if pubkeys.is_empty() {
         return None;
     }
@@ -2718,7 +2904,7 @@ mod tests {
             truncated: false,
         };
 
-        let pubkeys = collect_prompt_pubkeys(&batch, Some(&context));
+        let pubkeys = collect_prompt_pubkeys(&batch, None, Some(&context));
 
         let mut expected = vec![
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),

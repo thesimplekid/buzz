@@ -714,6 +714,12 @@ pub fn slash_command_for_batch(batch: &FlushBatch, known_names: &[&str]) -> Opti
 /// Conversation context fetched by the harness before prompting.
 #[derive(Debug, Clone)]
 pub enum ConversationContext {
+    /// Recent channel discussion before the triggering event.
+    Channel {
+        messages: Vec<ContextMessage>,
+        total: usize,
+        truncated: bool,
+    },
     /// Thread context for a reply event.
     Thread {
         messages: Vec<ContextMessage>,
@@ -971,12 +977,17 @@ fn format_context_hints(
     }
 }
 
-/// Format a conversation context section (thread or DM).
+/// Format a conversation context section (channel, thread, or DM).
 fn format_conversation_context(
     ctx: &ConversationContext,
     profile_lookup: Option<&PromptProfileLookup>,
 ) -> String {
     let (label, messages, total, truncated) = match ctx {
+        ConversationContext::Channel {
+            messages,
+            total,
+            truncated,
+        } => ("Channel Context", messages, total, truncated),
         ConversationContext::Thread {
             messages,
             total,
@@ -1011,6 +1022,7 @@ fn format_conversation_context(
 pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
+    pub channel_context: Option<&'a ConversationContext>,
     pub conversation_context: Option<&'a ConversationContext>,
     pub profile_lookup: Option<&'a PromptProfileLookup>,
     /// When true, base_prompt and system_prompt are delivered via the system
@@ -1110,7 +1122,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         triggering_event_id.as_deref(),
     ));
 
-    // 3. Conversation context (thread or DM).
+    // 3. Recent channel context, then thread or DM context.
+    if let Some(ctx) = args.channel_context {
+        sections.push(format_conversation_context(ctx, args.profile_lookup));
+    }
     if let Some(ctx) = args.conversation_context {
         sections.push(format_conversation_context(ctx, args.profile_lookup));
     }
@@ -2436,6 +2451,45 @@ mod tests {
         assert!(prompt.contains("Scope: dm"));
         assert!(prompt.contains("[Conversation Context (1 of 1 messages)]"));
         assert!(prompt.contains("Can you deploy?"));
+    }
+
+    #[test]
+    fn test_format_prompt_with_channel_context() {
+        let ch = Uuid::new_v4();
+        let event = make_event("@agent what should we do?");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+        };
+        let ctx = ConversationContext::Channel {
+            messages: vec![ContextMessage {
+                pubkey: "npub1abc".into(),
+                timestamp: "2026-06-19T10:00:00Z".into(),
+                content: "we discussed option A".into(),
+            }],
+            total: 1,
+            truncated: false,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_context: Some(&ctx),
+                ..Default::default()
+            },
+        );
+
+        assert!(prompt.contains("[Channel Context (1 of 1 messages)]"));
+        assert!(prompt.contains("we discussed option A"));
+        assert!(
+            prompt.find("[Channel Context").unwrap() < prompt.find("[Buzz event").unwrap(),
+            "channel context should appear before the triggering event"
+        );
     }
 
     #[test]

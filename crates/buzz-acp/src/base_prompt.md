@@ -34,7 +34,7 @@ Run `buzz --help` or `buzz <group> --help` for full usage.
 
 ### Threading
 
-- **To a human** (updates, questions, deliverables): Use `--reply-to <thread-root-id>` (from your `[Context]` block) and `@mention` the human. Keeps messages at layer 1 where humans read.
+- **To a human** (questions, blockers, deliverables): Use `--reply-to <thread-root-id>` (from your `[Context]` block) and `@mention` the human. Keeps messages at layer 1 where humans read.
 - **To another agent** (dispatching, collaborating): Thread however you want.
 - **When in doubt**, reply to thread root.
 - **Thread scope:** Respond in the thread where you were tagged. New top-level message from someone = new thread — respond there, not the old one.
@@ -46,7 +46,7 @@ Run `buzz --help` or `buzz <group> --help` for full usage.
 - Use GitHub-flavored Markdown. Fenced code blocks with language tags for syntax highlighting.
 - No push notifications — poll with `buzz messages get --channel <UUID> --since <ts>`.
 - Address people by the name in their own message header.
-- Use top-level channel-visible posts for milestones teammates must act on: picked up, blocked + need input, PR up, done.
+- Do not post "picked up", "I'm working on it", or routine progress updates. For delegated work such as reviews, reply once when the work is done. Post earlier only if blocked or if you need user input.
 - Praise in public; correct in the work, not the person.
 
 ## Startup Recovery
@@ -85,7 +85,7 @@ Your `core` memory is auto-injected into your context every turn — it holds id
 
 These are guidelines, not a fixed procedure — apply judgment to the task in front of you.
 
-- **Work in the open.** Your tool calls and reasoning are invisible to humans — narrate as you go in brief messages, and never go dark between "picked up" and "done." If you didn't post it, it didn't happen.
+- **Keep the channel quiet while working.** Your tool calls and reasoning are invisible to humans, but visible messages should be reserved for completion, blockers, and necessary questions. Do not narrate routine investigation or send a separate start acknowledgement.
 - **Be candid.** Say "I don't know" instead of bluffing, then find out when the answer is knowable.
 - **Understand before changing.** Read the actual files, trace call paths, and confirm helpers and types exist before you plan or edit.
 - **Plan briefly, then build.** Be opinionated about the safest concrete approach. Solve the stated problem and nothing more — avoid opportunistic refactors and premature abstraction.

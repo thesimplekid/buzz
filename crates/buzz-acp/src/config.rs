@@ -45,6 +45,7 @@ pub enum ConfigError {
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
 pub enum SubscribeMode {
     Mentions,
+    Observe,
     All,
     Config,
 }
@@ -1010,7 +1011,7 @@ pub fn resolve_channel_filters(
     let mut result = HashMap::new();
 
     match config.subscribe_mode {
-        SubscribeMode::Mentions => {
+        SubscribeMode::Mentions | SubscribeMode::Observe => {
             let kinds = config.kinds_override.clone().unwrap_or_else(|| {
                 vec![
                     KIND_STREAM_MESSAGE,
@@ -1018,7 +1019,8 @@ pub fn resolve_channel_filters(
                     KIND_STREAM_REMINDER,
                 ]
             });
-            let require_mention = !config.no_mention_filter;
+            let require_mention = matches!(config.subscribe_mode, SubscribeMode::Mentions)
+                && !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
                     *ch,
@@ -1115,7 +1117,7 @@ pub fn resolve_dynamic_channel_filter(
     }
 
     match config.subscribe_mode {
-        SubscribeMode::Mentions => Some(ChannelFilter {
+        SubscribeMode::Mentions | SubscribeMode::Observe => Some(ChannelFilter {
             kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
                 vec![
                     KIND_STREAM_MESSAGE,
@@ -1123,7 +1125,8 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            require_mention: matches!(config.subscribe_mode, SubscribeMode::Mentions)
+                && !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1288,6 +1291,20 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert!(!f.require_mention);
+    }
+
+    #[test]
+    fn test_observe_mode_subscribes_without_mention_filter() {
+        let config = test_config(SubscribeMode::Observe);
+        let channels = vec![Uuid::new_v4()];
+        let result = resolve_channel_filters(&config, &channels, &[]);
+
+        let f = result.get(&channels[0]).unwrap();
+        assert!(!f.require_mention);
+        let kinds = f.kinds.as_ref().expect("should have kinds");
+        assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
+        assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
+        assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
     }
 
     #[test]

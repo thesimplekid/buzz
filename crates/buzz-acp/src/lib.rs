@@ -1211,9 +1211,13 @@ async fn tokio_main() -> Result<()> {
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
-        SubscribeMode::Mentions => {
+        SubscribeMode::Mentions | SubscribeMode::Observe => {
             vec![SubscriptionRule {
-                name: "mentions".into(),
+                name: if matches!(config.subscribe_mode, SubscribeMode::Observe) {
+                    "observe".into()
+                } else {
+                    "mentions".into()
+                },
                 channels: filter::ChannelScope::All("all".into()),
                 kinds: config.kinds_override.clone().unwrap_or_else(|| {
                     vec![
@@ -1222,7 +1226,8 @@ async fn tokio_main() -> Result<()> {
                         KIND_STREAM_REMINDER,
                     ]
                 }),
-                require_mention: !config.no_mention_filter,
+                require_mention: matches!(config.subscribe_mode, SubscribeMode::Mentions)
+                    && !config.no_mention_filter,
                 filter: None,
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
@@ -1263,6 +1268,7 @@ async fn tokio_main() -> Result<()> {
     // ── Step 5: Build shared prompt context ──────────────────────────────────
     let dedup_mode = config.dedup_mode;
     let mut queue = EventQueue::new(dedup_mode);
+    let channel_context = Arc::new(pool::ChannelContextBuffer::default());
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
@@ -1295,6 +1301,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        channel_context: Arc::clone(&channel_context),
     });
 
     if !config.memory_enabled {
@@ -1775,39 +1782,33 @@ async fn tokio_main() -> Result<()> {
                             }
                             // ── End rotate command handling ──────────────────
 
-                            // ── Inbound author gate ──────────────────────────
-                            // Coarse security policy: drop events from disallowed
-                            // authors before they reach subscription rules or the
-                            // agent. Must be AFTER !shutdown (owner can always
-                            // shut down regardless of gate mode).
-                            //
-                            // Both OwnerOnly and Allowlist accept events from
-                            // "siblings" — pubkeys whose agent_owner_pubkey
-                            // matches this agent's owner (e.g. other bots
-                            // launched by the same human). Allowlist adds the
-                            // explicit pubkey list on top, for external people;
-                            // it never revokes same-owner team bots.
-                            {
-                                let author = buzz_event.event.pubkey.to_hex();
-                                let allowed = author_allowed(
-                                    &config.respond_to,
-                                    &config.respond_to_allowlist,
-                                    &author,
-                                    &owner_cache,
-                                    &ctx.rest_client,
-                                )
-                                .await;
-                                if !allowed {
-                                    tracing::debug!(
-                                        channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
-                                        mode = %config.respond_to,
-                                        "inbound author gate — dropping event"
-                                    );
-                                    continue;
+                            if !matches!(config.subscribe_mode, SubscribeMode::Observe) {
+                                // ── Inbound author gate ──────────────────────
+                                // Preserve existing modes' ordering: disallowed
+                                // authors are dropped before subscription rules
+                                // or agent-side effects.
+                                {
+                                    let author = buzz_event.event.pubkey.to_hex();
+                                    let allowed = author_allowed(
+                                        &config.respond_to,
+                                        &config.respond_to_allowlist,
+                                        &author,
+                                        &owner_cache,
+                                        &ctx.rest_client,
+                                    )
+                                    .await;
+                                    if !allowed {
+                                        tracing::debug!(
+                                            channel_id = %buzz_event.channel_id,
+                                            author = %buzz_event.event.pubkey.to_hex(),
+                                            mode = %config.respond_to,
+                                            "inbound author gate — dropping event"
+                                        );
+                                        continue;
+                                    }
                                 }
+                                // ── End inbound author gate ──────────────────
                             }
-                            // ── End inbound author gate ──────────────────────
 
                             let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
                             let prompt_tag = match matched {
@@ -1817,6 +1818,45 @@ async fn tokio_main() -> Result<()> {
                                     continue;
                                 }
                             };
+
+                            if matches!(config.subscribe_mode, SubscribeMode::Observe) {
+                                channel_context.record(buzz_event.channel_id, &buzz_event.event);
+
+                                if !event_mentions_agent(&buzz_event.event, &pubkey_hex) {
+                                    tracing::debug!(
+                                        channel_id = %buzz_event.channel_id,
+                                        kind = buzz_event.event.kind.as_u16(),
+                                        "observe mode recorded context for non-mentioned event"
+                                    );
+                                    continue;
+                                }
+
+                                // ── Inbound author gate ──────────────────────
+                                // In observe mode this is only a wake-up gate:
+                                // passive context has already been recorded.
+                                {
+                                    let author = buzz_event.event.pubkey.to_hex();
+                                    let allowed = author_allowed(
+                                        &config.respond_to,
+                                        &config.respond_to_allowlist,
+                                        &author,
+                                        &owner_cache,
+                                        &ctx.rest_client,
+                                    )
+                                    .await;
+                                    if !allowed {
+                                        tracing::debug!(
+                                            channel_id = %buzz_event.channel_id,
+                                            author = %buzz_event.event.pubkey.to_hex(),
+                                            mode = %config.respond_to,
+                                            "inbound author gate — dropping event"
+                                        );
+                                        continue;
+                                    }
+                                }
+                                // ── End inbound author gate ──────────────────
+                            }
+
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
