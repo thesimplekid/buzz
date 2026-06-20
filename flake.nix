@@ -75,6 +75,7 @@
             "buzz-acp"
             "buzz-agent"
             "buzz-dev-mcp"
+            "buzz-tui"
             "git-credential-nostr"
             "git-sign-nostr"
             "sprig"
@@ -87,6 +88,7 @@
             "buzz-acp"
             "buzz-agent"
             "buzz-dev-mcp"
+            "buzz-tui"
             "git-credential-nostr"
             "git-sign-nostr"
             "sprig"
@@ -154,9 +156,9 @@
             '';
 
             meta = {
-              description = "Buzz relay, CLI, and ACP runtime binaries";
+              description = "Buzz relay, CLI, TUI, and ACP runtime binaries";
               license = lib.licenses.asl20;
-              mainProgram = "buzz-relay";
+              mainProgram = "buzz-tui";
             };
           };
 
@@ -331,6 +333,19 @@
             exec buzz-relay "$@"
           '';
 
+          tui = mkScript "buzz-tui-dev" [ runtime adapters pkgs.nodejs ] ''
+            ${serviceLib}
+            load_buzz_dev_env
+            export BUZZ_ORIGINAL_PATH="''${BUZZ_ORIGINAL_PATH:-$PATH}"
+            export PATH="${runtime}/bin:${adapters}/bin:$PATH"
+            export BUZZ_ACP_MCP_COMMAND="''${BUZZ_ACP_MCP_COMMAND:-${runtime}/bin/buzz-dev-mcp}"
+            exec buzz-tui \
+              --buzz-bin "${runtime}/bin/buzz" \
+              --acp-bin "${runtime}/bin/buzz-acp" \
+              --mcp-command "$BUZZ_ACP_MCP_COMMAND" \
+              "$@"
+          '';
+
           acpHarness = name: command: extraEnv:
             mkScript name [ runtime adapters pkgs.nodejs ] ''
               ${serviceLib}
@@ -355,7 +370,8 @@
 
         in
         {
-          default = app relay "buzz-relay-dev";
+          default = app tui "buzz-tui-dev";
+          tui = app tui "buzz-tui-dev";
           relay = app relay "buzz-relay-dev";
           relay-only = app relayOnly "buzz-relay-only";
           migrate = app migrate "buzz-migrate";
@@ -410,7 +426,7 @@
 
             shellHook = ''
               ${commonShellHook}
-              echo "Buzz dev shell: relay and agent tooling. Use 'just relay' to start."
+              echo "Buzz dev shell: relay and TUI tooling. Use 'just relay' or 'just tui'."
             '';
           };
 
@@ -419,7 +435,7 @@
 
             shellHook = ''
               ${runtimeShellHook}
-              echo "Buzz runtime shell: relay, CLI, and ACP agent tools available"
+              echo "Buzz runtime shell: buzz, buzz-tui, and ACP agent tools available"
             '';
           };
 

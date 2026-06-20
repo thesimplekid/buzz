@@ -1257,6 +1257,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-tui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "buzz-core",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "chrono",
+ "clap",
+ "crossterm 0.29.0",
+ "diffy",
+ "hex",
+ "infer",
+ "keyring",
+ "nix 0.31.3",
+ "nostr",
+ "rand 0.10.1",
+ "ratatui",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-workflow"
 version = "0.1.0"
 dependencies = [

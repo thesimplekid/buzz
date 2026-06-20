@@ -415,6 +415,24 @@ admin-check: fmt-check
 relay-release:
     nix run .#relay
 
+
+# Run the Ratatui terminal client with local debug binaries for fast iteration
+tui *ARGS: _require-nix-shell
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p buzz-acp -p buzz-dev-mcp
+    repo_root="{{justfile_directory()}}"
+    acp_bin="$repo_root/target/debug/buzz-acp"
+    mcp_bin="$repo_root/target/debug/buzz-dev-mcp"
+    cargo run -p buzz-tui -- \
+        --acp-bin "$acp_bin" \
+        --mcp-command "$mcp_bin" \
+        {{ARGS}}
+
+# Run the packaged Ratatui terminal client through Nix
+tui-nix *ARGS:
+    nix run .#tui -- {{ARGS}}
+
 # Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
 dev *ARGS:
     #!/usr/bin/env bash
