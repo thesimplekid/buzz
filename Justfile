@@ -55,15 +55,15 @@ reset:
 
 # Stop all dev services (keep data)
 down:
-    docker compose down
+    nix run .#services-down
 
 # Show dev service status
 ps:
-    docker compose ps
+    nix run .#services-ps
 
 # Tail all service logs
 logs *ARGS:
-    docker compose logs -f {{ARGS}}
+    nix run .#services-logs -- {{ARGS}}
 
 # ─── Build & Check ───────────────────────────────────────────────────────────
 
@@ -143,34 +143,34 @@ _ensure-sidecar-stubs:
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
 
-# Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
-_ensure-services:
+_require-nix-shell:
     #!/usr/bin/env bash
     set -euo pipefail
-    pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-postgres 2>/dev/null || echo "not_found")
-    redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-redis 2>/dev/null || echo "not_found")
-    if [[ "$pg" == "healthy" && "$redis" == "healthy" ]]; then
-        echo "Services already healthy"
-        exit 0
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        echo "Enter the Nix dev shell first: nix develop" >&2
+        exit 1
     fi
-    echo "Starting services..."
-    docker compose up -d || true
-    echo -n "Waiting for services"
-    for i in $(seq 1 40); do
-        pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-postgres 2>/dev/null || echo "not_found")
-        redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-redis 2>/dev/null || echo "not_found")
-        if [[ "$pg" == "healthy" && "$redis" == "healthy" ]]; then
-            echo " ready"
-            exit 0
-        fi
-        echo -n "."
-        sleep 3
-    done
-    echo " timed out"
-    exit 1
+
+# Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
+_ensure-services: _require-nix-shell
+    nix run .#services-up
 
 # Apply database migrations if the dev database is running
-_ensure-migrations: _ensure-services
+_ensure-migrations: _require-nix-shell
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _ensure-services
+    if [[ -f .env ]]; then
+        set -a
+        source .env
+        set +a
+    fi
+    export DATABASE_URL="${DATABASE_URL:-postgres://buzz:buzz_dev@localhost:5432/buzz}"
+    export PGHOST="${PGHOST:-localhost}"
+    export PGPORT="${PGPORT:-5432}"
+    export PGUSER="${PGUSER:-buzz}"
+    export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
+    export PGDATABASE="${PGDATABASE:-buzz}"
     cargo run -p buzz-admin -- migrate
 
 # Run clippy on the desktop Tauri Rust crate
@@ -265,12 +265,28 @@ desktop-screenshot *ARGS:
 
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
-# Start the relay server (auto-starts Docker services if needed)
-relay: bootstrap _ensure-migrations
+# Start the relay server from local sources (auto-starts Docker services if needed)
+relay *ARGS: _require-nix-shell
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
-    cargo run -p buzz-relay
+    just _ensure-migrations
+    if [[ -f .env ]]; then
+        set -a
+        source .env
+        set +a
+    fi
+    export DATABASE_URL="${DATABASE_URL:-postgres://buzz:buzz_dev@localhost:5432/buzz}"
+    export PGHOST="${PGHOST:-localhost}"
+    export PGPORT="${PGPORT:-5432}"
+    export PGUSER="${PGUSER:-buzz}"
+    export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
+    export PGDATABASE="${PGDATABASE:-buzz}"
+    export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
+    export TYPESENSE_API_KEY="${TYPESENSE_API_KEY:-buzz_dev_key}"
+    export TYPESENSE_URL="${TYPESENSE_URL:-http://localhost:8108}"
+    export BUZZ_BIND_ADDR="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
+    export RUST_LOG="${RUST_LOG:-buzz_relay=debug,buzz_db=debug,buzz_auth=debug,buzz_pubsub=debug,tower_http=debug}"
+    cargo run -p buzz-relay -- {{ARGS}}
 
 # Start the relay with the built web UI served from it
 relay-web: bootstrap _ensure-migrations
@@ -282,8 +298,8 @@ relay-web: bootstrap _ensure-migrations
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
 
 # Start the relay server in release mode
-relay-release: _ensure-migrations
-    cargo run -p buzz-relay --release
+relay-release:
+    nix run .#relay
 
 # Start buzz-proxy (dev mode)
 proxy:
@@ -293,11 +309,28 @@ proxy:
 proxy-release:
     cargo run -p buzz-proxy --release
 
+# Run the Ratatui terminal client with local debug binaries for fast iteration
+tui *ARGS: _require-nix-shell
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p buzz-acp -p buzz-dev-mcp
+    cargo run -p buzz-tui -- \
+        --acp-bin target/debug/buzz-acp \
+        --mcp-command target/debug/buzz-dev-mcp \
+        {{ARGS}}
+
+# Run the packaged Ratatui terminal client through Nix
+tui-nix *ARGS:
+    nix run .#tui -- {{ARGS}}
+
 # Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
-dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
+dev *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    just bootstrap
+    just _ensure-sidecar-stubs
+    just _ensure-migrations
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
     ./target/debug/buzz-relay &
     RELAY_PID=$!
@@ -315,10 +348,12 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
-staging *ARGS: bootstrap _ensure-sidecar-stubs
+staging *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    just bootstrap
+    just _ensure-sidecar-stubs
     pnpm install  # unconditional: staging must always start with a clean dep tree
     cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
@@ -628,15 +663,59 @@ release *ARGS:
 goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
-    source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
-    exec env "${env_args[@]}" ./target/release/buzz-acp
+    env_args=(
+        BUZZ_RELAY_URL="{{relay}}"
+        BUZZ_PRIVATE_KEY="{{key}}"
+        BUZZ_ACP_AGENTS="{{agents}}"
+    )
+    [[ -n "{{prompt}}" ]] && env_args+=(BUZZ_ACP_SYSTEM_PROMPT="{{prompt}}")
+    if [[ "{{heartbeat}}" != "0" ]]; then
+        env_args+=(BUZZ_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
+    fi
+    exec env "${env_args[@]}" nix run .#acp-goose
+
+# Run a Codex ACP agent connected to a Buzz relay (foreground)
+codex relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    env_args=(
+        BUZZ_RELAY_URL="{{relay}}"
+        BUZZ_PRIVATE_KEY="{{key}}"
+        BUZZ_ACP_AGENTS="{{agents}}"
+    )
+    [[ -n "{{prompt}}" ]] && env_args+=(BUZZ_ACP_SYSTEM_PROMPT="{{prompt}}")
+    if [[ "{{heartbeat}}" != "0" ]]; then
+        env_args+=(BUZZ_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
+    fi
+    exec env "${env_args[@]}" nix run .#acp-codex
+
+# Run a Claude Code ACP agent connected to a Buzz relay (foreground)
+claude relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    env_args=(
+        BUZZ_RELAY_URL="{{relay}}"
+        BUZZ_PRIVATE_KEY="{{key}}"
+        BUZZ_ACP_AGENTS="{{agents}}"
+    )
+    [[ -n "{{prompt}}" ]] && env_args+=(BUZZ_ACP_SYSTEM_PROMPT="{{prompt}}")
+    if [[ "{{heartbeat}}" != "0" ]]; then
+        env_args+=(BUZZ_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
+    fi
+    exec env "${env_args[@]}" nix run .#acp-claude
 
 # Run a goose agent in the background (screen session named 'goose-agent-N')
 goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
-    source ./scripts/_goose-env.sh "{{relay}}" "{{key}}" "{{agents}}" "{{heartbeat}}" "{{prompt}}"
-    screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") ./target/release/buzz-acp"
+    env_args=(
+        BUZZ_RELAY_URL="{{relay}}"
+        BUZZ_PRIVATE_KEY="{{key}}"
+        BUZZ_ACP_AGENTS="{{agents}}"
+    )
+    [[ -n "{{prompt}}" ]] && env_args+=(BUZZ_ACP_SYSTEM_PROMPT="{{prompt}}")
+    if [[ "{{heartbeat}}" != "0" ]]; then
+        env_args+=(BUZZ_ACP_HEARTBEAT_INTERVAL={{heartbeat}})
+    fi
+    screen -dmS goose-agent-{{agents}} bash -c "$(printf '%q ' env "${env_args[@]}") nix run .#acp-goose"
     echo "Agent running in screen session 'goose-agent-{{agents}}'. Attach with: screen -r goose-agent-{{agents}}"
