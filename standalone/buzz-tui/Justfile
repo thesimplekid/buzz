@@ -1,0 +1,24 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
+default:
+    @just --list
+
+fmt:
+    cargo fmt --check
+
+test:
+    cargo test --locked
+
+check:
+    cargo check --locked --all-features
+    cargo check --locked --no-default-features
+    cargo clippy --locked --all-targets --all-features -- -D warnings
+
+ci: fmt test check
+
+run *ARGS:
+    cargo run --locked -- {{ARGS}}
+
+release:
+    ./scripts/package-release.sh
+

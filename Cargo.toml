@@ -103,6 +103,7 @@ hmac      = "0.13"
 rand = "0.10"
 subtle = "2.6"
 zeroize = "1.8"
+qrcode = { version = "0.14", default-features = false }
 
 # Concurrent data structures
 dashmap = "6"
@@ -133,9 +134,9 @@ buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }
 buzz-client = { version = "0.1.0", path = "crates/buzz-client" }
-buzz-pairing-client = { version = "0.1.0", path = "crates/buzz-pairing-client" }
 buzz-sdk = { version = "0.1.0", path = "crates/buzz-sdk" }
 buzz-ws-client = { version = "0.1.0", path = "crates/buzz-ws-client" }
+buzz-pairing-client = { version = "0.1.0", path = "crates/buzz-pairing-client" }
 buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
 
 # CI profile — builds the relay for desktop e2e. Dependencies keep full

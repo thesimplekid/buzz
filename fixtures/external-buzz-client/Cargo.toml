@@ -1,0 +1,16 @@
+[package]
+name = "external-buzz-client"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Keep this fixture outside the repository's root Cargo workspace. It models a
+# standalone consumer and prevents accidental workspace dependency inheritance.
+[workspace]
+
+[dependencies]
+buzz-client = {
+  git = "https://github.com/block/buzz",
+  rev = "753bc22f42bbed8b7f3ea0c1d8e572bd8f5e4dfd",
+}
+serde_json = "1"

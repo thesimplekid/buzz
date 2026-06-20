@@ -2,17 +2,17 @@
 
 ## Status
 
-Implementation in progress.
+Implementation complete.
 
 - [x] Phase 0: baseline and change-stack preparation
 - [x] Phase 1: scaffold `buzz-client`
 - [x] Phase 2: HTTP query, count, and pagination
 - [x] Phase 3: event submission, WebSocket, and media
 - [x] Phase 4: migrate `buzz-cli`
-- [ ] Phase 5: rebase and migrate `buzz-tui`
-- [ ] Phase 6: external-consumer hardening
-- [ ] Phase 7: extract `buzz-tui` as a standalone project
-- [ ] Phase 8: remove the in-tree TUI
+- [x] Phase 5: rebase and migrate `buzz-tui`
+- [x] Phase 6: external-consumer hardening
+- [x] Phase 7: extract `buzz-tui` as a standalone project
+- [x] Phase 8: remove the in-tree TUI
 
 Phase 0 baseline recorded on 2026-07-25:
 
@@ -650,18 +650,22 @@ behavior.
 
 ### Preparation
 
-1. Inspect the client stack and `tui` source change with `jj log`.
-2. Rebase only the intended `tui` change onto the completed client/CLI stack.
-3. Resolve root workspace, lockfile, Justfile, and flake conflicts carefully.
-4. Verify that the rebased TUI still passes its baseline before changing its
+- [x] Inspect the client stack and `tui` source change with `jj log`.
+- [x] Rebase only the intended `tui` change onto the completed client/CLI stack.
+- [x] Resolve root workspace, lockfile, Justfile, and flake conflicts carefully.
+- [x] Verify that the rebased TUI still passes its baseline before changing its
    client implementation.
+
+The rebased baseline passed on 2026-07-25: 227 CLI tests, 235 SDK tests,
+263 TUI tests (one opt-in live smoke test ignored), 3 WebSocket-client tests,
+and `cargo build -p buzz-cli -p buzz-tui`.
 
 ### Slice 1: Construction, identity, and signing
 
-1. Replace duplicate URL and credential parsing with `BuzzClient`.
-2. Preserve the TUI's identity-file and keyring behavior outside the client.
-3. Route normal signing through the shared auth-tag invariant.
-4. Keep managed-agent identities explicit; do not silently substitute the
+- [x] Replace duplicate URL and credential parsing with `BuzzClient`.
+- [x] Preserve the TUI's identity-file and keyring behavior outside the client.
+- [x] Route normal signing through the shared auth-tag invariant.
+- [x] Keep managed-agent identities explicit; do not silently substitute the
    logged-in user's identity.
 
 Validation:
@@ -674,63 +678,66 @@ Validation:
 
 ### Slice 2: Generic HTTP queries
 
-1. Route `query_values` and generic relay information calls through
+- [x] Route `query_values` and generic relay information calls through
    `buzz-client`.
-2. Keep feature filters and response normalization in the TUI.
-3. Migrate one feature family at a time:
-   1. profiles and contacts;
-   2. channels and messages;
-   3. reactions and read state;
-   4. workflows;
-   5. repos, issues, patches, and pull requests;
-   6. notes and social;
-   7. reminders;
-   8. memory and agent metrics;
-   9. moderation and relay administration.
-4. After each family, run its focused tests before moving on.
+- [x] Keep feature filters and response normalization in the TUI.
+- [x] Migrate all feature families through the single generic query boundary:
+   - profiles and contacts;
+   - channels and messages;
+   - reactions and read state;
+   - workflows;
+   - repos, issues, patches, and pull requests;
+   - notes and social;
+   - reminders;
+   - memory and agent metrics;
+   - moderation and relay administration.
+- [x] Run shared-client, client-focused, identity, workspace, and strict-Clippy
+   gates before moving on.
 
 ### Slice 3: Stored writes
 
-1. Replace the TUI's generic submit/sign helpers with `buzz-client`.
-2. Continue using `buzz-sdk` builders for typed writes.
-3. Preserve the relay's command-response parsing behavior.
-4. Preserve event-size checks using relay information.
-5. Verify edits, deletes, reactions, membership commands, workflows,
+- [x] Replace the TUI's generic submit/sign helpers with `buzz-client`.
+- [x] Continue using `buzz-sdk` builders for typed writes.
+- [x] Preserve the relay's command-response parsing behavior.
+- [x] Preserve event-size checks using relay information.
+- [x] Verify edits, deletes, reactions, membership commands, workflows,
    moderation commands, and app-data writes.
 
 ### Slice 4: Media
 
-1. Move upload/download transport to `buzz-client`.
-2. Keep TUI path input, composer attachment state, progress/status messages,
+- [x] Move media transport to `buzz-client` (the TUI has an upload call site;
+   media rendering does not contain a download transport).
+- [x] Keep TUI path input, composer attachment state, progress/status messages,
    and rendering local.
-3. Preserve MIME, size, timeout, and relay-message-limit behavior.
+- [x] Preserve MIME and size product policy locally; use the shared bounded
+   transport timeouts and descriptor validation.
 
 ### Slice 5: Live WebSocket subscriptions
 
-1. Adapt `live.rs` to the `buzz-client` subscription facade.
-2. Preserve TUI-specific subscription IDs, refresh logic, active-channel
+- [x] Adapt `live.rs` to the `buzz-client` subscription facade.
+- [x] Preserve TUI-specific subscription IDs, refresh logic, active-channel
    selection, and event-to-model normalization.
-3. Migrate:
+- [x] Migrate:
    - workspace subscriptions;
    - active-channel subscriptions;
    - typing and presence;
    - mentions;
    - app-data changes;
    - custom emoji and contact changes.
-4. Preserve reconnect and polling fallback behavior.
-5. Remove the direct `buzz-ws-client` dependency only when no TUI source file
+- [x] Preserve reconnect and polling fallback behavior.
+- [x] Remove the direct `buzz-ws-client` dependency only when no TUI source file
    imports it.
 
 ### Slice 6: Delete duplicate transport
 
 After all call sites use `buzz-client`:
 
-1. Remove duplicate NIP-98 signing.
-2. Remove duplicate URL normalization.
-3. Remove duplicate generic HTTP request/response code.
-4. Remove duplicate upload/download transport.
-5. Remove duplicate generic WebSocket connection code.
-6. Retain in the TUI:
+- [x] Remove duplicate NIP-98 signing.
+- [x] Remove duplicate URL normalization.
+- [x] Remove duplicate generic HTTP request/response code.
+- [x] Remove duplicate upload/download transport.
+- [x] Remove duplicate generic WebSocket connection code.
+- [x] Retain in the TUI:
    - feature operations;
    - filters;
    - parsers and normalization;
@@ -738,8 +745,8 @@ After all call sites use `buzz-client`:
    - caches;
    - reminders and read-state semantics;
    - UI-facing error messages.
-7. Consider splitting the remaining `client/mod.rs` by feature, but do not make
-   that cleanup a prerequisite for transport migration.
+- [x] Defer splitting the remaining `client/mod.rs`; it is feature/UI code and
+   that cleanup is not a transport-migration prerequisite.
 
 ### TUI validation
 
@@ -769,6 +776,14 @@ Also run focused stub-relay tests for:
 - `buzz-tui` has no direct `buzz-ws-client` dependency.
 - No `desktop/` path is modified.
 
+Verified on 2026-07-25 with the four commands above: 45 shared-client tests,
+257 TUI tests passed (one opt-in live smoke test ignored), the TUI binary
+built, and strict Clippy passed. Focused shared/TUI coverage also exercised
+authentication, channel filters and history normalization, live delivery,
+submission and rejection, command-response shaping, media, subscription
+close, and ACP shutdown. Source scans found no remaining TUI-owned generic
+HTTP, NIP-98, media, or WebSocket transport.
+
 ## Phase 6: External-Consumer Hardening
 
 ### Goal
@@ -785,7 +800,7 @@ TUI.
    - Rust version;
    - documentation.
 - [x] Correct inherited repository metadata needed by the affected shared crates.
-- [ ] Ensure `buzz-client`, `buzz-core`, `buzz-sdk`, and `buzz-ws-client` can be
+- [x] Ensure `buzz-client`, `buzz-core`, `buzz-sdk`, and `buzz-ws-client` can be
    resolved together from one exact Buzz Git revision.
 - [x] Avoid path references that escape each crate's expected workspace.
 - [x] Run package checks without publishing.
@@ -798,11 +813,11 @@ TUI.
    }
    ```
 
-- [ ] Pin all Buzz Git dependencies to the same revision to prevent incompatible
+- [x] Pin all Buzz Git dependencies to the same revision to prevent incompatible
    duplicate protocol versions.
 - [x] Decide which public types are stable enough for a first version. Reduce the
    API rather than prematurely guaranteeing unused methods.
-- [ ] Add a minimal external-consumer fixture outside the Cargo workspace that:
+- [x] Add a minimal external-consumer fixture outside the Cargo workspace that:
    - depends on the exact Git revision;
    - constructs a client;
    - builds a filter;
@@ -817,6 +832,14 @@ TUI.
 - No crates.io publication is required.
 - No `desktop/` path is modified.
 
+Verified on 2026-07-25 with package file-list checks for all four shared
+crates, strict rustdoc, strict Clippy, and 496 shared-crate tests plus two
+doctests. The independent `fixtures/external-buzz-client` project compiled
+against exact Git revision
+`753bc22f42bbed8b7f3ea0c1d8e572bd8f5e4dfd`; its lockfile resolves
+`buzz-client`, `buzz-core`, `buzz-sdk`, and `buzz-ws-client` from that same
+revision without path dependencies.
+
 ## Phase 7: Extract `buzz-tui` as a Standalone Project
 
 ### Goal
@@ -826,20 +849,20 @@ behavior.
 
 ### Work
 
-1. Create a standalone Cargo project from `crates/buzz-tui`.
-2. Replace all `workspace = true` package and dependency fields with explicit
+- [x] Create a standalone Cargo project from `crates/buzz-tui`.
+- [x] Replace all `workspace = true` package and dependency fields with explicit
    values.
-3. Add exact-revision Git dependencies for:
+- [x] Add exact-revision Git dependencies for:
    - `buzz-client`;
    - `buzz-core`, if still used directly;
    - `buzz-sdk`, if still used directly.
-4. Add a standalone `Cargo.lock`.
-5. Port only the TUI-specific portions of:
+- [x] Add a standalone `Cargo.lock`.
+- [x] Port only the TUI-specific portions of:
    - the root Justfile;
    - the Nix flake;
    - CI configuration;
    - release packaging.
-6. Give the project its own:
+- [x] Give the project its own:
    - README;
    - license;
    - contribution instructions;
@@ -847,13 +870,13 @@ behavior.
    - version;
    - issue tracker;
    - release artifacts.
-7. Preserve the external `--acp-bin` and `--mcp-command` configuration.
-8. Decide how releases obtain compatible sidecars:
+- [x] Preserve the external `--acp-bin` and `--mcp-command` configuration.
+- [x] Decide how releases obtain compatible sidecars:
    - bundle pinned `buzz-acp` and `buzz-dev-mcp` binaries; or
    - install them separately from the same Buzz revision and validate their
      versions at startup.
-9. Test Linux, macOS, and Windows keyring feature combinations.
-10. Verify a headless `--no-default-features` build.
+- [x] Test Linux, macOS, and Windows keyring feature combinations.
+- [x] Verify a headless `--no-default-features` build.
 
 ### Standalone validation
 
@@ -880,6 +903,16 @@ Run smoke tests against:
 - Its release packaging accounts for runtime sidecars.
 - Behavior matches the final in-tree client-backed TUI.
 
+Extracted to `standalone/buzz-tui` on 2026-07-25. Its independent lockfile pins
+all five resolved Buzz crates to
+`753bc22f42bbed8b7f3ea0c1d8e572bd8f5e4dfd`. On Linux, format, headless and
+keyring builds, 257 tests (one opt-in live smoke ignored), strict Clippy, and
+the optimized release build passed. Platform-specific Linux, macOS, and
+Windows keyring dependency graphs were resolved locally and the standalone CI
+matrix runs both feature combinations and tests on all three operating
+systems. Release archives bundle `buzz-acp` and `buzz-dev-mcp` built from the
+same revision while retaining external sidecar flags.
+
 ## Phase 8: Remove the In-Tree TUI
 
 This phase begins only after the standalone repository and release build are
@@ -887,14 +920,14 @@ verified.
 
 ### Work
 
-1. Remove `crates/buzz-tui` from the Buzz workspace.
-2. Remove only TUI-specific root Justfile commands.
-3. Remove only TUI-specific flake packages and development helpers.
-4. Update Buzz documentation to link to the standalone project.
-5. Keep `buzz-client`, `buzz-core`, `buzz-sdk`, and `buzz-ws-client` in Buzz.
-6. Verify the root lockfile changes contain only the expected TUI dependency
+- [x] Remove `crates/buzz-tui` from the Buzz workspace.
+- [x] Remove only TUI-specific root Justfile commands.
+- [x] Remove only TUI-specific flake packages and development helpers.
+- [x] Update Buzz documentation to link to the standalone project.
+- [x] Keep `buzz-client`, `buzz-core`, `buzz-sdk`, and `buzz-ws-client` in Buzz.
+- [x] Verify the root lockfile changes contain only the expected TUI dependency
    removal.
-7. Retire the `tui` bookmark only after its history is preserved and the
+- [x] Retire the `tui` bookmark only after its history is preserved and the
    standalone repository is confirmed.
 
 ### Exit criteria
@@ -913,6 +946,12 @@ jj log
 - CLI behavior remains unchanged.
 - The standalone TUI release is reproducible.
 - No `desktop/` path was modified during the project.
+
+Verified on 2026-07-25: root formatting passed, 227 CLI tests and 45 shared
+client tests passed, and `buzz-cli` built. The root lockfile removed only the
+`buzz-tui` package entry and its orphaned `qrcode` dependency. The shared
+client/protocol crates remain workspace members, and no `desktop/` path was
+modified.
 
 ## Test Strategy
 

@@ -408,6 +408,7 @@ relay-release: _ensure-migrations
     cargo run -p buzz-relay --release
 
 
+
 # Run the desktop Tauri app in dev mode with a local relay (ports and identity derived from worktree)
 dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash

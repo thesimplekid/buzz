@@ -156,6 +156,11 @@ For a split-terminal workflow (relay logs separate from Vite output), use `just 
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
+For a terminal interface, use the
+[standalone `buzz-tui` project](standalone/buzz-tui). It pins the shared Buzz
+client and protocol crates to one exact revision and ships compatible ACP
+sidecars in its release bundles.
+
 ---
 
 ## Windows prerequisites
