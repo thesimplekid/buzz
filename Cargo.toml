@@ -24,6 +24,8 @@ members = [
     "crates/git-sign-nostr",
     "crates/buzz-pair-relay",
     "crates/buzz-dev-mcp",
+    "crates/buzz-tui",
+    "crates/buzz-tui-client",
     "examples/countdown-bot",
 ]
 exclude = ["desktop/src-tauri"]
@@ -117,6 +119,7 @@ buzz-proxy = { path = "crates/buzz-proxy" }
 buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }
+buzz-tui-client = { path = "crates/buzz-tui-client" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
 
 # CI profile — builds the relay for desktop e2e. Dependencies keep full

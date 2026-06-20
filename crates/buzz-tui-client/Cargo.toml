@@ -1,0 +1,25 @@
+[package]
+name = "buzz-tui-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Direct relay client and shared DTOs for buzz-tui"
+
+[dependencies]
+base64 = "0.22"
+buzz-core = { workspace = true }
+buzz-sdk = { workspace = true }
+buzz-ws-client = { workspace = true }
+diffy = "0.5"
+hex = { workspace = true }
+infer = "0.19"
+nostr = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
