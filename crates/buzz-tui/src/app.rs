@@ -9,8 +9,8 @@ use crate::client::{
     ConversationKind, CreateChannelOptions, CreateIssueOptions, CreatePatchOptions,
     CreateRepoOptions, CustomEmojiEntry, GitIssue, GitPatch, ListNotesOptions, LongFormNoteOptions,
     MemoryEntry, Message, Note, NoteAuthor, PresenceInfo, PresenceStatus, ProfileField, Reaction,
-    ReadState, RepoProject, TuiMessageView, TuiRelayClient, UserProfile, Workflow, WorkflowDetail,
-    WorkflowRun,
+    ReadState, RelayMember, Reminder, ReminderTarget, RepoProject, TuiMessageView, TuiRelayClient,
+    UserProfile, Workflow, WorkflowDetail, WorkflowRun,
 };
 use crate::live::LiveChannelTarget;
 use crate::memory::selected_agent_memory_identity;
@@ -30,6 +30,7 @@ mod hints;
 mod navigation;
 mod palette;
 mod profile_social;
+mod reminders;
 mod timeline;
 mod workflows;
 mod workspaces;
@@ -104,6 +105,8 @@ pub enum Focus {
     EmojiImport,
     Feed,
     Pulse,
+    Reminders,
+    ReminderCreate,
     Help,
     Workspaces,
     WorkspaceAdd,
@@ -338,6 +341,12 @@ pub enum PulseSource {
     Agents,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReminderDraftMode {
+    Create,
+    Snooze(String),
+}
+
 impl PulseSource {
     pub fn label(self) -> &'static str {
         match self {
@@ -502,6 +511,12 @@ pub struct App {
     pub note_summary: String,
     pub note_tags: String,
     pub note_content: String,
+    pub reminders: Vec<Reminder>,
+    pub selected_reminder: usize,
+    pub reminder_target: Option<ReminderTarget>,
+    pub reminder_note: String,
+    pub reminder_preset: usize,
+    pub reminder_draft_mode: ReminderDraftMode,
     pub profile: Option<UserProfile>,
     pub selected_profile_field: ProfileField,
     pub profile_input: String,
@@ -700,6 +715,12 @@ impl App {
             note_summary: String::new(),
             note_tags: String::new(),
             note_content: String::new(),
+            reminders: Vec::new(),
+            selected_reminder: 0,
+            reminder_target: None,
+            reminder_note: String::new(),
+            reminder_preset: 0,
+            reminder_draft_mode: ReminderDraftMode::Create,
             profile: None,
             selected_profile_field: ProfileField::DisplayName,
             profile_input: String::new(),
@@ -899,6 +920,10 @@ impl App {
             self.remember_message_author_profiles(&feed).await;
             self.feed = feed;
             clamp_index(&mut self.selected_feed, self.feed.len());
+        }
+
+        if matches!(self.focus, Focus::Reminders | Focus::ReminderCreate) {
+            self.refresh_reminders().await;
         }
 
         if self.focus == Focus::Sidebar {
@@ -1418,6 +1443,10 @@ impl App {
             Focus::Notes => {
                 move_index(&mut self.selected_note, self.notes.len(), delta);
             }
+            Focus::Reminders => {
+                let len = self.visible_reminders().len();
+                move_index(&mut self.selected_reminder, len, delta);
+            }
             Focus::Profile => self.move_profile_field(delta),
             Focus::Contacts => move_index(&mut self.selected_contact, self.contacts.len(), delta),
             Focus::UserProfile => {}
@@ -1487,6 +1516,7 @@ impl App {
             | Focus::RepoPatchCreate
             | Focus::EmojiEdit
             | Focus::NoteEdit
+            | Focus::ReminderCreate
             | Focus::WorkspaceAdd
             | Focus::Confirm
             | Focus::Help => {}
@@ -1599,6 +1629,8 @@ impl App {
             Focus::WorkflowInputs => self.trigger_selected_workflow_with_inputs().await,
             Focus::WorkflowApproval => self.submit_workflow_approval().await,
             Focus::Notes => {}
+            Focus::Reminders => self.open_selected_reminder_thread().await,
+            Focus::ReminderCreate => self.save_reminder_draft().await,
             Focus::NoteEdit => self.save_note().await,
             Focus::CreateAgent => self.create_managed_agent().await,
             Focus::Profile => self.edit_profile_field(),
@@ -2912,6 +2944,8 @@ impl App {
             | Focus::WorkflowApproval
             | Focus::Notes
             | Focus::NoteEdit
+            | Focus::Reminders
+            | Focus::ReminderCreate
             | Focus::CreateAgent
             | Focus::Profile
             | Focus::ProfileEdit
@@ -2971,6 +3005,8 @@ impl App {
             | Focus::WorkflowApproval
             | Focus::Notes
             | Focus::NoteEdit
+            | Focus::Reminders
+            | Focus::ReminderCreate
             | Focus::CreateAgent
             | Focus::Profile
             | Focus::ProfileEdit
@@ -3371,6 +3407,15 @@ impl App {
         }
         if self.focus == Focus::Notes {
             self.focus = Focus::Sidebar;
+            return;
+        }
+        if self.focus == Focus::Reminders {
+            self.focus = Focus::Sidebar;
+            return;
+        }
+        if self.focus == Focus::ReminderCreate {
+            self.clear_reminder_draft();
+            self.focus = Focus::Reminders;
             return;
         }
         if self.focus == Focus::NoteEdit {
@@ -5538,6 +5583,25 @@ mod tests {
         }
     }
 
+    fn test_reminder(id: &str, status: crate::client::ReminderStatus) -> Reminder {
+        Reminder {
+            id: id.to_string(),
+            not_before: Some(now_seconds().saturating_sub(1)),
+            content: crate::client::ReminderContent {
+                target: Some(ReminderTarget {
+                    event_id: format!("event-{id}"),
+                    channel_id: "channel-1".to_string(),
+                    preview: format!("preview {id}"),
+                    author_pubkey: "author".to_string(),
+                }),
+                note: None,
+                status,
+            },
+            created_at: 1,
+            event_id: format!("relay-{id}"),
+        }
+    }
+
     fn test_managed_runtime(id: &str, label: &str) -> AgentRuntime {
         AgentRuntime {
             id: id.to_string(),
@@ -5883,6 +5947,266 @@ mod tests {
             .find(|command| command.label == "Delete message")
             .expect("delete command");
         assert_eq!(delete.disabled_reason, Some("select a message first"));
+    }
+
+    #[test]
+    fn timeline_reminder_shortcut_populates_selected_message_target() {
+        let mut app = test_app();
+        app.channels = vec![test_channel("channel-1", "general")];
+        app.messages = vec![Message {
+            id: "event-1".to_string(),
+            pubkey: "author-1".to_string(),
+            content: "remember this\nwith details".to_string(),
+            channel_id: "channel-1".to_string(),
+            ..Message::default()
+        }];
+        app.focus = Focus::Timeline;
+
+        app.start_reminder_for_selected_message();
+
+        assert_eq!(app.focus, Focus::ReminderCreate);
+        let target = app.reminder_target.expect("reminder target");
+        assert_eq!(target.event_id, "event-1");
+        assert_eq!(target.channel_id, "channel-1");
+        assert_eq!(target.preview, "remember this");
+        assert_eq!(target.author_pubkey, "author-1");
+    }
+
+    #[test]
+    fn timeline_selection_moves_synchronously_and_clears_reactions() {
+        let mut app = test_app();
+        app.focus = Focus::Timeline;
+        app.channels = vec![test_channel("channel-1", "general")];
+        app.messages = vec![
+            Message {
+                id: "event-1".to_string(),
+                content: "first".to_string(),
+                channel_id: "channel-1".to_string(),
+                ..Message::default()
+            },
+            Message {
+                id: "event-2".to_string(),
+                content: "second".to_string(),
+                channel_id: "channel-1".to_string(),
+                ..Message::default()
+            },
+        ];
+        app.selected_reactions = vec![Reaction {
+            emoji: "+".to_string(),
+            count: 1,
+            pubkeys: vec!["pubkey-1".to_string()],
+        }];
+        app.message_detail_scroll = 12;
+
+        assert!(app.move_timeline_selection(1));
+
+        assert_eq!(app.selected_message, 1);
+        assert_eq!(
+            app.selected_timeline_message_id().as_deref(),
+            Some("event-2")
+        );
+        assert_eq!(app.message_detail_scroll, 0);
+        assert!(app.selected_reactions.is_empty());
+
+        app.search_results = app.messages.clone();
+        app.timeline_mode = TimelineMode::Search;
+        app.selected_search_result = 0;
+        assert!(app.move_timeline_selection(1));
+        assert_eq!(app.selected_search_result, 1);
+
+        app.feed = app.messages.clone();
+        app.timeline_mode = TimelineMode::Feed;
+        app.selected_feed = 0;
+        assert!(app.move_timeline_selection(1));
+        assert_eq!(app.selected_feed, 1);
+
+        app.pulse = app.messages.clone();
+        app.timeline_mode = TimelineMode::Pulse;
+        app.selected_pulse = 0;
+        assert!(app.move_timeline_selection(1));
+        assert_eq!(app.selected_pulse, 1);
+    }
+
+    #[test]
+    fn stale_hydrate_reactions_do_not_apply_after_selection_changes() {
+        let mut app = test_app();
+        app.focus = Focus::Timeline;
+        app.channels = vec![test_channel("channel-1", "general")];
+        app.messages = vec![
+            Message {
+                id: "event-1".to_string(),
+                channel_id: "channel-1".to_string(),
+                ..Message::default()
+            },
+            Message {
+                id: "event-2".to_string(),
+                channel_id: "channel-1".to_string(),
+                ..Message::default()
+            },
+        ];
+        app.selected_message = 0;
+        let stale_target = app.hydrate_target(BTreeSet::new());
+
+        app.selected_message = 1;
+        app.apply_hydrate_result(
+            &stale_target,
+            HydrateResult {
+                profiles: Vec::new(),
+                reactions: Some(Ok(vec![Reaction {
+                    emoji: "+".to_string(),
+                    count: 3,
+                    pubkeys: vec!["pubkey-1".to_string()],
+                }])),
+            },
+        );
+
+        assert!(app.selected_reactions.is_empty());
+
+        let current_target = app.hydrate_target(BTreeSet::new());
+        app.apply_hydrate_result(
+            &current_target,
+            HydrateResult {
+                profiles: Vec::new(),
+                reactions: Some(Ok(vec![Reaction {
+                    emoji: "heart".to_string(),
+                    count: 1,
+                    pubkeys: vec!["pubkey-2".to_string()],
+                }])),
+            },
+        );
+
+        assert_eq!(
+            app.selected_reactions
+                .iter()
+                .map(|reaction| reaction.emoji.as_str())
+                .collect::<Vec<_>>(),
+            vec!["heart"]
+        );
+    }
+
+    #[test]
+    fn primary_refresh_reactions_apply_when_target_had_no_selected_message() {
+        let mut app = test_app();
+        app.focus = Focus::Timeline;
+        app.channels = vec![test_channel("channel-1", "general")];
+        let target = app.refresh_target();
+
+        app.apply_refresh_result(
+            &target,
+            RefreshResult {
+                sidebar: None,
+                read_state: None,
+                starred_channel_ids: None,
+                muted_channel_ids: None,
+                channel_sections: None,
+                channel_detail_id: None,
+                channel_detail: None,
+                channel_members: None,
+                message_channel_id: Some("channel-1".to_string()),
+                messages: Some(Ok(vec![
+                    Message {
+                        id: "event-1".to_string(),
+                        channel_id: "channel-1".to_string(),
+                        created_at: 1,
+                        ..Message::default()
+                    },
+                    Message {
+                        id: "event-2".to_string(),
+                        channel_id: "channel-1".to_string(),
+                        created_at: 2,
+                        ..Message::default()
+                    },
+                ])),
+                feed: None,
+                profiles: Vec::new(),
+                reaction_event_id: Some("event-2".to_string()),
+                reactions: Some(Ok(vec![Reaction {
+                    emoji: "+".to_string(),
+                    count: 2,
+                    pubkeys: vec!["pubkey-1".to_string()],
+                }])),
+            },
+        );
+
+        assert_eq!(
+            app.selected_timeline_message_id().as_deref(),
+            Some("event-2")
+        );
+        assert_eq!(
+            app.selected_reactions
+                .iter()
+                .map(|reaction| (reaction.emoji.as_str(), reaction.count))
+                .collect::<Vec<_>>(),
+            vec![("+", 2)]
+        );
+    }
+
+    #[test]
+    fn primary_refresh_applies_channel_members() {
+        let mut app = test_app();
+        app.channels = vec![test_channel("channel-1", "general")];
+        app.selected_channel = 0;
+        let target = app.refresh_target();
+
+        app.apply_refresh_result(
+            &target,
+            RefreshResult {
+                sidebar: None,
+                read_state: None,
+                starred_channel_ids: None,
+                muted_channel_ids: None,
+                channel_sections: None,
+                channel_detail_id: Some("channel-1".to_string()),
+                channel_detail: Some(Ok(Some(Channel {
+                    id: "channel-1".to_string(),
+                    name: "general".to_string(),
+                    description: "General chat".to_string(),
+                    ..Channel::default()
+                }))),
+                channel_members: Some(Ok(vec![ChannelMember {
+                    pubkey: "pubkey-1".to_string(),
+                    role: "admin".to_string(),
+                }])),
+                message_channel_id: None,
+                messages: None,
+                feed: None,
+                profiles: Vec::new(),
+                reaction_event_id: None,
+                reactions: None,
+            },
+        );
+
+        assert_eq!(
+            app.selected_channel_detail
+                .as_ref()
+                .map(|channel| channel.description.as_str()),
+            Some("General chat")
+        );
+        assert_eq!(
+            app.channel_members
+                .iter()
+                .map(|member| (member.pubkey.as_str(), member.role.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("pubkey-1", "admin")]
+        );
+    }
+
+    #[test]
+    fn visible_reminders_hide_cancelled_and_done() {
+        let mut app = test_app();
+        app.reminders = vec![
+            test_reminder("pending", crate::client::ReminderStatus::Pending),
+            test_reminder("done", crate::client::ReminderStatus::Done),
+            test_reminder("cancelled", crate::client::ReminderStatus::Cancelled),
+        ];
+
+        assert_eq!(
+            app.visible_reminders()
+                .iter()
+                .map(|reminder| reminder.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pending"]
+        );
     }
 
     #[test]

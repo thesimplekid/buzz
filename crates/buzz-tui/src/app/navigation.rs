@@ -30,6 +30,7 @@ fn location_key(entry: &NavigationEntry) -> String {
         Focus::Memory | Focus::MemoryEdit | Focus::MemoryPatch => "memory",
         Focus::Emoji | Focus::EmojiEdit | Focus::EmojiImport => "emoji",
         Focus::Notes | Focus::NoteEdit => "notes",
+        Focus::Reminders | Focus::ReminderCreate => "reminders",
         Focus::Repos | Focus::RepoCreate | Focus::RepoIssueCreate | Focus::RepoPatchCreate => {
             "repos"
         }

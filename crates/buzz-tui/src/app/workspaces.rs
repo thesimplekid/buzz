@@ -140,6 +140,9 @@ impl App {
         self.workflow_inputs.clear();
         self.clear_workflow_approval();
         self.notes.clear();
+        self.reminders.clear();
+        self.selected_reminder = 0;
+        self.clear_reminder_draft();
         self.profile = None;
         self.presence = None;
         self.last_presence_status = None;

@@ -12,7 +12,7 @@ use crate::app::{
     RepoPatchField, TimelineMode, WorkflowApprovalField, MIN_AGENT_PANEL_HEIGHT, MIN_DETAIL_WIDTH,
     MIN_MESSAGE_DETAIL_HEIGHT, MIN_SIDEBAR_WIDTH,
 };
-use crate::client::{ConversationKind, ProfileField};
+use crate::client::{count_due_reminders, group_reminders, ConversationKind, ProfileField};
 
 const MIN_TIMELINE_WIDTH: u16 = 30;
 
@@ -600,6 +600,10 @@ fn draw_side_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         draw_notes(frame, app, area);
         return;
     }
+    if matches!(app.focus, Focus::Reminders | Focus::ReminderCreate) {
+        draw_reminders(frame, app, area);
+        return;
+    }
     if matches!(
         app.focus,
         Focus::Profile | Focus::ProfileEdit | Focus::ProfileAvatarUpload
@@ -826,8 +830,10 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
         "y: copy selected message body to clipboard",
         "Enter: open selected thread",
         "e / d: edit or delete selected message",
+        "L: create a reminder for selected message",
         "+ / -: react or remove reaction",
         "[ / ]: forum downvote or upvote",
+        "L outside timeline: open reminders (Enter target, C complete, S snooze, D cancel)",
         "",
         "People And Profile",
         "P: profile",
@@ -1465,6 +1471,109 @@ fn draw_notes(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+fn draw_reminders(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    if app.focus == Focus::ReminderCreate {
+        let mode = match &app.reminder_draft_mode {
+            crate::app::ReminderDraftMode::Create => "New reminder",
+            crate::app::ReminderDraftMode::Snooze(_) => "Snooze reminder",
+        };
+        let target = app
+            .reminder_target
+            .as_ref()
+            .map(|target| compact_text(&target.preview, 220))
+            .unwrap_or_else(|| "-".to_string());
+        let note = if app.reminder_note.trim().is_empty() {
+            "-"
+        } else {
+            app.reminder_note.trim()
+        };
+        let text = format!(
+            "{mode}\npreset: {}\ndue: {}\ntarget: {}\nnote: {}\n\nTab cycles preset\nEnter saves\nEsc cancels",
+            app.selected_reminder_preset_label(),
+            app.selected_reminder_preset_timestamp(),
+            target,
+            note
+        );
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .block(panel_block("Reminders", true)),
+            area,
+        );
+        return;
+    }
+
+    let now = ui_now_seconds();
+    let groups = group_reminders(&app.reminders, now);
+    let due = count_due_reminders(&app.reminders, now);
+    if groups.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No pending reminders\n\nSelect a timeline message and press L")
+                .wrap(Wrap { trim: false })
+                .block(panel_block("Reminders", true)),
+            area,
+        );
+        return;
+    }
+
+    let mut text = format!("{due} due\n");
+    let mut flat_index = 0usize;
+    for group in groups {
+        text.push_str(&format!("\n{}\n", group.label));
+        for reminder in group.reminders {
+            let marker = if flat_index == app.selected_reminder {
+                ">"
+            } else {
+                " "
+            };
+            let title = reminder
+                .content
+                .target
+                .as_ref()
+                .map(|target| target.preview.as_str())
+                .or(reminder.content.note.as_deref())
+                .unwrap_or("(reminder)");
+            let due_text = reminder
+                .not_before
+                .map(format_reminder_due)
+                .unwrap_or_else(|| "-".to_string());
+            text.push_str(&format!(
+                "{marker} {}  {}\n",
+                compact_text(title, 78),
+                due_text
+            ));
+            if let Some(target) = reminder.content.target.as_ref() {
+                let author = app.author_label(&target.author_pubkey);
+                let channel = app
+                    .channels
+                    .iter()
+                    .find(|channel| channel.id == target.channel_id)
+                    .map(|channel| format!("#{}", channel.name))
+                    .unwrap_or_else(|| format!("#{}", short_id(&target.channel_id)));
+                text.push_str(&format!(
+                    "    from {} in {}\n",
+                    compact_text(&author, 28),
+                    compact_text(&channel, 44)
+                ));
+            }
+            if let Some(note) = reminder.content.note.as_deref() {
+                if reminder.content.target.is_some() && !note.trim().is_empty() {
+                    text.push_str(&format!("    {}\n", compact_text(note, 76)));
+                }
+            }
+            flat_index += 1;
+        }
+    }
+    text.push_str("\nEnter opens target thread\nC completes  S snoozes  D cancels");
+
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(panel_block("Reminders", true)),
+        area,
+    );
+}
+
 fn draw_workflows(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if app.focus == Focus::WorkflowEdit {
         let mode = if app.workflow_edit_existing {
@@ -1911,6 +2020,7 @@ fn draw_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let is_remove_relay_member = app.focus == Focus::RemoveRelayMember;
     let is_change_relay_member_role = app.focus == Focus::ChangeRelayMemberRole;
     let is_note_edit = app.focus == Focus::NoteEdit;
+    let is_reminder_create = app.focus == Focus::ReminderCreate;
     let is_workflow_edit = app.focus == Focus::WorkflowEdit;
     let is_workflow_inputs = app.focus == Focus::WorkflowInputs;
     let is_workflow_approval = app.focus == Focus::WorkflowApproval;
@@ -1972,6 +2082,8 @@ fn draw_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         panel_block("Change Relay Role", true)
     } else if is_note_edit {
         panel_block(&note_edit_title, true)
+    } else if is_reminder_create {
+        panel_block("Reminder Note", true)
     } else if is_workflow_edit {
         panel_block("Workflow YAML", true)
     } else if is_workflow_inputs {
@@ -2112,6 +2224,12 @@ fn draw_composer(frame: &mut Frame<'_>, app: &App, area: Rect) {
             note_edit_placeholder(app.note_edit_field)
         } else {
             current
+        }
+    } else if is_reminder_create {
+        if app.reminder_note.is_empty() {
+            "Optional note. Tab cycles preset, Enter saves"
+        } else {
+            &app.reminder_note
         }
     } else if is_workflow_edit {
         if app.workflow_yaml.is_empty() {
@@ -2325,6 +2443,34 @@ fn empty_dash(value: &str) -> &str {
         "-"
     } else {
         value
+    }
+}
+
+fn ui_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn format_reminder_due(timestamp: u64) -> String {
+    let now = ui_now_seconds();
+    if timestamp <= now {
+        let minutes = now.saturating_sub(timestamp) / 60;
+        if minutes == 0 {
+            "due now".to_string()
+        } else {
+            format!("{minutes}m overdue")
+        }
+    } else {
+        let minutes = timestamp.saturating_sub(now) / 60;
+        if minutes < 60 {
+            format!("in {minutes}m")
+        } else if minutes < 48 * 60 {
+            format!("in {}h", minutes / 60)
+        } else {
+            format!("in {}d", minutes / (24 * 60))
+        }
     }
 }
 

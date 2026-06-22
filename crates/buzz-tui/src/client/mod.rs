@@ -9,13 +9,15 @@ use buzz_core::engram::{
 };
 use buzz_core::kind::{
     KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_BLOSSOM_AUTH, KIND_CANVAS, KIND_CONTACT_LIST,
-    KIND_DM_CREATED, KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_REPO_ANNOUNCEMENT, KIND_HTTP_AUTH, KIND_LONG_FORM, KIND_NIP29_GROUP_MEMBERS,
-    KIND_NIP29_GROUP_METADATA, KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE, KIND_REACTION,
-    KIND_READ_STATE, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_V2,
-    KIND_TEXT_NOTE, KIND_WORKFLOW_CANCELLED, KIND_WORKFLOW_COMPLETED, KIND_WORKFLOW_DEF,
-    KIND_WORKFLOW_FAILED, KIND_WORKFLOW_STEP_COMPLETED, KIND_WORKFLOW_STEP_FAILED,
-    KIND_WORKFLOW_STEP_STARTED, KIND_WORKFLOW_TRIGGER, KIND_WORKFLOW_TRIGGERED,
+    KIND_DM_CREATED, KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_REPO_ANNOUNCEMENT, KIND_HTTP_AUTH, KIND_LONG_FORM,
+    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST,
+    KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE, KIND_REACTION, KIND_READ_STATE,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_V2, KIND_TEXT_NOTE,
+    KIND_WORKFLOW_CANCELLED, KIND_WORKFLOW_COMPLETED, KIND_WORKFLOW_DEF, KIND_WORKFLOW_FAILED,
+    KIND_WORKFLOW_STEP_COMPLETED, KIND_WORKFLOW_STEP_FAILED, KIND_WORKFLOW_STEP_STARTED,
+    KIND_WORKFLOW_TRIGGER, KIND_WORKFLOW_TRIGGERED, RELAY_ADMIN_ADD_MEMBER,
+    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
 };
 use buzz_sdk::mentions::{extract_nostr_uris, normalize_mention_pubkeys, strip_code_regions};
 use buzz_sdk::{
@@ -23,12 +25,14 @@ use buzz_sdk::{
     ThreadRef, Visibility, VoteDirection,
 };
 use buzz_ws_client::{publish_event, NostrWsConnection, RelayMessage, WsClientError};
+use chrono::{Local, TimeZone};
 use nostr::nips::nip01::Coordinate;
 use nostr::nips::nip44::{self, Version};
 use nostr::{
     Alphabet, Event, EventBuilder, EventId, Filter, FromBech32, Keys, Kind, PublicKey,
     SingleLetterTag, Tag, Timestamp, ToBech32,
 };
+use rand::RngExt;
 use reqwest::{Client, RequestBuilder};
 use serde_json::json;
 use serde_json::Value;
@@ -1449,6 +1453,168 @@ impl TuiRelayClient {
         })
     }
 
+    pub async fn fetch_reminders(&self) -> Result<Vec<Reminder>, RelayClientError> {
+        let value = self
+            .query_values(&[json!({
+                "kinds": [KIND_EVENT_REMINDER],
+                "authors": [self.public_key_hex()],
+                "limit": 200,
+            })])
+            .await?;
+        let mut reminders: Vec<Reminder> = parse_nostr_events(&value)
+            .into_iter()
+            .filter_map(|event| self.decrypt_reminder(&event))
+            .collect();
+        reminders
+            .sort_by_key(|reminder| (reminder.not_before.unwrap_or(u64::MAX), reminder.id.clone()));
+        Ok(reminders)
+    }
+
+    pub fn build_reminder_event(
+        &self,
+        id: &str,
+        content: ReminderContent,
+        not_before: Option<u64>,
+        expiration: Option<u64>,
+        created_at: Option<u64>,
+    ) -> Result<Event, RelayClientError> {
+        let plaintext = serde_json::to_string(&content)?;
+        let ciphertext = nip44::encrypt(
+            self.keys.secret_key(),
+            &self.keys.public_key(),
+            plaintext,
+            Version::V2,
+        )
+        .map_err(|error| RelayClientError::Signing(error.to_string()))?;
+        let mut tags =
+            vec![Tag::parse(["d", id])
+                .map_err(|error| RelayClientError::Signing(error.to_string()))?];
+        if let Some(not_before) = not_before {
+            tags.push(
+                Tag::parse(["not_before", &not_before.to_string()])
+                    .map_err(|error| RelayClientError::Signing(error.to_string()))?,
+            );
+        }
+        if let Some(expiration) = expiration {
+            tags.push(
+                Tag::parse(["expiration", &expiration.to_string()])
+                    .map_err(|error| RelayClientError::Signing(error.to_string()))?,
+            );
+        }
+        let mut builder =
+            EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), ciphertext).tags(tags);
+        if let Some(created_at) = created_at {
+            builder = builder.custom_created_at(Timestamp::from(created_at));
+        }
+        self.sign_event(builder)
+    }
+
+    pub async fn create_reminder(
+        &self,
+        target: ReminderTarget,
+        not_before: u64,
+        note: Option<String>,
+    ) -> Result<Reminder, RelayClientError> {
+        let id = random_reminder_id();
+        let content = ReminderContent {
+            target: Some(target),
+            note: note.filter(|note| !note.trim().is_empty()),
+            status: ReminderStatus::Pending,
+        };
+        let event =
+            self.build_reminder_event(&id, content.clone(), Some(not_before), None, None)?;
+        self.submit_event(&event).await?;
+        Ok(Reminder {
+            id,
+            not_before: Some(not_before),
+            content,
+            created_at: event.created_at.as_secs(),
+            event_id: event.id.to_hex(),
+        })
+    }
+
+    pub async fn complete_reminder(
+        &self,
+        reminder: &Reminder,
+    ) -> Result<Reminder, RelayClientError> {
+        self.terminal_reminder(reminder, ReminderStatus::Done).await
+    }
+
+    pub async fn cancel_reminder(&self, reminder: &Reminder) -> Result<Reminder, RelayClientError> {
+        self.terminal_reminder(reminder, ReminderStatus::Cancelled)
+            .await
+    }
+
+    pub async fn snooze_reminder(
+        &self,
+        reminder: &Reminder,
+        not_before: u64,
+    ) -> Result<Reminder, RelayClientError> {
+        let mut content = reminder.content.clone();
+        content.status = ReminderStatus::Pending;
+        let created_at = monotonic_reminder_created_at(reminder.created_at);
+        let event = self.build_reminder_event(
+            &reminder.id,
+            content.clone(),
+            Some(not_before),
+            None,
+            Some(created_at),
+        )?;
+        self.submit_event(&event).await?;
+        Ok(Reminder {
+            id: reminder.id.clone(),
+            not_before: Some(not_before),
+            content,
+            created_at: event.created_at.as_secs(),
+            event_id: event.id.to_hex(),
+        })
+    }
+
+    async fn terminal_reminder(
+        &self,
+        reminder: &Reminder,
+        status: ReminderStatus,
+    ) -> Result<Reminder, RelayClientError> {
+        let mut content = reminder.content.clone();
+        content.status = status;
+        let created_at = monotonic_reminder_created_at(reminder.created_at);
+        let event = self.build_reminder_event(
+            &reminder.id,
+            content.clone(),
+            None,
+            Some(jittered_reminder_expiration()),
+            Some(created_at),
+        )?;
+        self.submit_event(&event).await?;
+        Ok(Reminder {
+            id: reminder.id.clone(),
+            not_before: None,
+            content,
+            created_at: event.created_at.as_secs(),
+            event_id: event.id.to_hex(),
+        })
+    }
+
+    fn decrypt_reminder(&self, event: &Event) -> Option<Reminder> {
+        let id = find_tag_value(event.tags.iter(), "d")?;
+        let plaintext = nip44::decrypt(
+            self.keys.secret_key(),
+            &self.keys.public_key(),
+            event.content.as_str(),
+        )
+        .ok()?;
+        let content = parse_reminder_content(&plaintext)?;
+        Some(Reminder {
+            id,
+            not_before: find_tag_value(event.tags.iter(), "not_before")
+                .as_deref()
+                .and_then(parse_not_before),
+            content,
+            created_at: event.created_at.as_secs(),
+            event_id: event.id.to_hex(),
+        })
+    }
+
     pub async fn channel_preference_ids(
         &self,
         kind: ChannelPreferenceKind,
@@ -2595,10 +2761,10 @@ fn normalize_loopback_http_url(relay_url: &str) -> String {
     if matches!(
         parsed.host_str(),
         Some("localhost") | Some("::1") | Some("[::1]")
-    )
-        && parsed.set_host(Some("127.0.0.1")).is_ok() {
-            return parsed.to_string().trim_end_matches('/').to_string();
-        }
+    ) && parsed.set_host(Some("127.0.0.1")).is_ok()
+    {
+        return parsed.to_string().trim_end_matches('/').to_string();
+    }
     relay_url.to_string()
 }
 
@@ -3152,6 +3318,151 @@ fn parse_nostr_events(value: &Value) -> Vec<Event> {
         .collect()
 }
 
+pub fn parse_not_before(raw: &str) -> Option<u64> {
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.len() > 1 && raw.starts_with('0') {
+        return None;
+    }
+    raw.chars()
+        .all(|ch| ch.is_ascii_digit())
+        .then(|| raw.parse::<u64>().ok())
+        .flatten()
+}
+
+pub fn parse_reminder_content(plaintext: &str) -> Option<ReminderContent> {
+    let value = serde_json::from_str::<Value>(plaintext).ok()?;
+    let object = value.as_object()?;
+    let status = match object.get("status")?.as_str()? {
+        "pending" => ReminderStatus::Pending,
+        "done" => ReminderStatus::Done,
+        "cancelled" => ReminderStatus::Cancelled,
+        _ => return None,
+    };
+    let note = match object.get("note") {
+        Some(Value::String(note)) => Some(note.clone()),
+        Some(_) => return None,
+        None => None,
+    };
+    let target = match object.get("target") {
+        Some(target) => Some(parse_reminder_target(target)?),
+        None => None,
+    };
+    if target.is_none() && note.as_deref().is_none_or(str::is_empty) {
+        return None;
+    }
+    Some(ReminderContent {
+        target,
+        note,
+        status,
+    })
+}
+
+fn parse_reminder_target(value: &Value) -> Option<ReminderTarget> {
+    let object = value.as_object()?;
+    Some(ReminderTarget {
+        event_id: object.get("eventId")?.as_str()?.to_string(),
+        channel_id: object.get("channelId")?.as_str()?.to_string(),
+        preview: object.get("preview")?.as_str()?.to_string(),
+        author_pubkey: object.get("authorPubkey")?.as_str()?.to_string(),
+    })
+}
+
+pub fn count_due_reminders(reminders: &[Reminder], now: u64) -> usize {
+    reminders
+        .iter()
+        .filter(|reminder| reminder_is_due(reminder, now))
+        .count()
+}
+
+fn reminder_is_due(reminder: &Reminder, now: u64) -> bool {
+    reminder.content.status == ReminderStatus::Pending
+        && reminder
+            .not_before
+            .is_some_and(|not_before| not_before <= now)
+}
+
+pub fn group_reminders(reminders: &[Reminder], now: u64) -> Vec<ReminderGroup> {
+    let end_of_today = local_end_of_today(now);
+    let mut overdue = Vec::new();
+    let mut today = Vec::new();
+    let mut upcoming = Vec::new();
+
+    for reminder in reminders {
+        if reminder.content.status != ReminderStatus::Pending {
+            continue;
+        }
+        let Some(not_before) = reminder.not_before else {
+            continue;
+        };
+        if not_before <= now {
+            overdue.push(reminder.clone());
+        } else if not_before <= end_of_today {
+            today.push(reminder.clone());
+        } else {
+            upcoming.push(reminder.clone());
+        }
+    }
+
+    let mut groups = Vec::new();
+    if !overdue.is_empty() {
+        groups.push(ReminderGroup {
+            label: "Overdue",
+            reminders: overdue,
+        });
+    }
+    if !today.is_empty() {
+        groups.push(ReminderGroup {
+            label: "Today",
+            reminders: today,
+        });
+    }
+    if !upcoming.is_empty() {
+        groups.push(ReminderGroup {
+            label: "Upcoming",
+            reminders: upcoming,
+        });
+    }
+    groups
+}
+
+fn local_end_of_today(now: u64) -> u64 {
+    let Some(now_local) = Local.timestamp_opt(now as i64, 0).single() else {
+        return now;
+    };
+    now_local
+        .date_naive()
+        .and_hms_opt(23, 59, 59)
+        .and_then(|naive| Local.from_local_datetime(&naive).single())
+        .map(|local| local.timestamp().max(0) as u64)
+        .unwrap_or(now)
+}
+
+fn find_tag_value<'a>(tags: impl IntoIterator<Item = &'a Tag>, key: &str) -> Option<String> {
+    tags.into_iter().find_map(|tag| {
+        let parts = tag.as_slice();
+        (parts.first().map(String::as_str) == Some(key))
+            .then(|| parts.get(1).cloned())
+            .flatten()
+    })
+}
+
+fn random_reminder_id() -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill(&mut bytes);
+    hex::encode(bytes)
+}
+
+fn jittered_reminder_expiration() -> u64 {
+    let days = 30 + rand::rng().random_range(0..60);
+    Timestamp::now().as_secs() + days * 86_400
+}
+
+fn monotonic_reminder_created_at(previous: u64) -> u64 {
+    Timestamp::now().as_secs().max(previous.saturating_add(1))
+}
+
 fn find_root_from_tags(tags: Option<&Value>) -> Option<EventId> {
     let mut root = None;
     let mut reply = None;
@@ -3310,6 +3621,190 @@ mod tests {
             keys,
             auth_tag_json: Some(r#"["auth","owner","kind=9","sig"]"#.to_string()),
         }
+    }
+
+    fn reminder_content() -> ReminderContent {
+        ReminderContent {
+            target: Some(ReminderTarget {
+                event_id: "event-1".to_string(),
+                channel_id: "channel-1".to_string(),
+                preview: "hello".to_string(),
+                author_pubkey: "author-1".to_string(),
+            }),
+            note: Some("note".to_string()),
+            status: ReminderStatus::Pending,
+        }
+    }
+
+    fn reminder(id: &str, not_before: Option<u64>, status: ReminderStatus) -> Reminder {
+        let mut content = reminder_content();
+        content.status = status;
+        Reminder {
+            id: id.to_string(),
+            not_before,
+            content,
+            created_at: 10,
+            event_id: format!("event-{id}"),
+        }
+    }
+
+    #[test]
+    fn parse_not_before_accepts_ascii_seconds_only() {
+        assert_eq!(parse_not_before("0"), Some(0));
+        assert_eq!(parse_not_before("42"), Some(42));
+        assert_eq!(parse_not_before(""), None);
+        assert_eq!(parse_not_before("042"), None);
+        assert_eq!(parse_not_before("42s"), None);
+    }
+
+    #[test]
+    fn parse_reminder_content_accepts_target_and_note_only_reminders() {
+        let target = r#"{"status":"pending","target":{"eventId":"e","channelId":"c","preview":"p","authorPubkey":"a"}}"#;
+        assert_eq!(
+            parse_reminder_content(target)
+                .and_then(|content| content.target)
+                .map(|target| target.event_id),
+            Some("e".to_string())
+        );
+
+        let note = r#"{"status":"pending","note":"standalone"}"#;
+        assert_eq!(
+            parse_reminder_content(note).and_then(|content| content.note),
+            Some("standalone".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_reminder_content_rejects_malformed_plaintext() {
+        assert!(parse_reminder_content("not json").is_none());
+        assert!(parse_reminder_content(r#"{"status":"waiting","note":"x"}"#).is_none());
+        assert!(parse_reminder_content(r#"{"status":"pending"}"#).is_none());
+        assert!(parse_reminder_content(r#"{"status":"pending","note":1}"#).is_none());
+    }
+
+    #[test]
+    fn group_reminders_buckets_pending_and_hides_terminal_states() {
+        let now = 86_400 * 10 + 12 * 60 * 60;
+        let groups = group_reminders(
+            &[
+                reminder("over", Some(now - 1), ReminderStatus::Pending),
+                reminder("today", Some(now + 60), ReminderStatus::Pending),
+                reminder("upcoming", Some(now + 86_400), ReminderStatus::Pending),
+                reminder("done", Some(now - 1), ReminderStatus::Done),
+                reminder("cancelled", Some(now - 1), ReminderStatus::Cancelled),
+                reminder("missing", None, ReminderStatus::Pending),
+            ],
+            now,
+        );
+        assert_eq!(
+            groups
+                .iter()
+                .map(|group| (
+                    group.label,
+                    group
+                        .reminders
+                        .iter()
+                        .map(|reminder| reminder.id.as_str())
+                        .collect::<Vec<_>>()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Overdue", vec!["over"]),
+                ("Today", vec!["today"]),
+                ("Upcoming", vec!["upcoming"]),
+            ]
+        );
+        assert_eq!(
+            count_due_reminders(
+                &[
+                    reminder("over", Some(now - 1), ReminderStatus::Pending),
+                    reminder("future", Some(now + 1), ReminderStatus::Pending),
+                ],
+                now,
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn reminder_event_construction_uses_kind_tags_and_encrypted_content() {
+        let client = client();
+        let event = client
+            .build_reminder_event(
+                "reminder-id",
+                reminder_content(),
+                Some(123),
+                None,
+                Some(100),
+            )
+            .expect("build reminder");
+
+        assert_eq!(event.kind.as_u16(), KIND_EVENT_REMINDER as u16);
+        assert_eq!(
+            find_tag_value(event.tags.iter(), "d").as_deref(),
+            Some("reminder-id")
+        );
+        assert_eq!(
+            find_tag_value(event.tags.iter(), "not_before").as_deref(),
+            Some("123")
+        );
+        assert!(find_tag_value(event.tags.iter(), "expiration").is_none());
+        let plaintext = nip44::decrypt(
+            client.keys.secret_key(),
+            &client.keys.public_key(),
+            event.content.as_str(),
+        )
+        .expect("decrypt reminder");
+        assert_eq!(
+            parse_reminder_content(&plaintext).map(|content| content.status),
+            Some(ReminderStatus::Pending)
+        );
+    }
+
+    #[test]
+    fn terminal_reminder_event_omits_not_before_and_adds_expiration() {
+        let client = client();
+        let mut content = reminder_content();
+        content.status = ReminderStatus::Done;
+        let event = client
+            .build_reminder_event("same-d", content, None, Some(999), Some(501))
+            .expect("build terminal reminder");
+
+        assert_eq!(event.created_at.as_secs(), 501);
+        assert_eq!(
+            find_tag_value(event.tags.iter(), "d").as_deref(),
+            Some("same-d")
+        );
+        assert!(find_tag_value(event.tags.iter(), "not_before").is_none());
+        assert_eq!(
+            find_tag_value(event.tags.iter(), "expiration").as_deref(),
+            Some("999")
+        );
+    }
+
+    #[test]
+    fn snooze_reminder_event_reuses_d_and_updates_not_before() {
+        let client = client();
+        let event = client
+            .build_reminder_event(
+                "stable-d",
+                reminder_content(),
+                Some(777),
+                None,
+                Some(monotonic_reminder_created_at(500)),
+            )
+            .expect("build snooze reminder");
+
+        assert!(event.created_at.as_secs() > 500);
+        assert_eq!(
+            find_tag_value(event.tags.iter(), "d").as_deref(),
+            Some("stable-d")
+        );
+        assert_eq!(
+            find_tag_value(event.tags.iter(), "not_before").as_deref(),
+            Some("777")
+        );
+        assert!(find_tag_value(event.tags.iter(), "expiration").is_none());
     }
 
     #[test]

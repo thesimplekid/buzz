@@ -146,6 +146,18 @@ impl App {
                 hint("E", "edit"),
                 hint("D", "delete"),
             ],
+            Focus::Reminders => vec![
+                hint("Enter", "open"),
+                hint("C", "complete"),
+                hint("S", "snooze"),
+                hint("D", "cancel"),
+                hint("Esc", "back"),
+            ],
+            Focus::ReminderCreate => vec![
+                hint("Tab", "preset"),
+                hint("Enter", "save"),
+                hint("Esc", "cancel"),
+            ],
             Focus::Repos => vec![
                 hint("A", "new repo"),
                 hint("I", "new issue"),

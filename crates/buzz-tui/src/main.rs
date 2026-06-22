@@ -646,6 +646,9 @@ async fn handle_key(
         KeyCode::Tab if app.focus == Focus::WorkflowApproval => {
             app.next_workflow_approval_field();
         }
+        KeyCode::Tab if app.focus == Focus::ReminderCreate => {
+            app.next_reminder_preset();
+        }
         KeyCode::Tab if app.focus == Focus::Composer && app.composer_completion.is_some() => {
             app.accept_completion();
         }
@@ -687,6 +690,9 @@ async fn handle_key(
         }
         KeyCode::BackTab if app.focus == Focus::WorkflowApproval => {
             app.previous_workflow_approval_field();
+        }
+        KeyCode::BackTab if app.focus == Focus::ReminderCreate => {
+            app.previous_reminder_preset();
         }
         KeyCode::BackTab => {
             app.previous_focus();
@@ -736,10 +742,16 @@ async fn handle_key(
         KeyCode::Char('N') if !text_input => {
             app.focus_notes().await;
         }
+        KeyCode::Char('L') if app.focus == Focus::Timeline => {
+            app.start_reminder_for_selected_message();
+        }
+        KeyCode::Char('L') if !text_input => {
+            app.focus_reminders().await;
+        }
         KeyCode::Char('P') if !text_input => {
             app.focus_profile().await;
         }
-        KeyCode::Char('C') if !text_input => {
+        KeyCode::Char('C') if !text_input && app.focus != Focus::Reminders => {
             app.focus_contacts().await;
         }
         KeyCode::Char('U') if !text_input => {
@@ -900,6 +912,15 @@ async fn handle_key(
         }
         KeyCode::Char('D') if app.focus == Focus::Notes => {
             app.request_confirm(ConfirmAction::DeleteNote);
+        }
+        KeyCode::Char('C') if app.focus == Focus::Reminders => {
+            app.complete_selected_reminder().await;
+        }
+        KeyCode::Char('D') if app.focus == Focus::Reminders => {
+            app.cancel_selected_reminder().await;
+        }
+        KeyCode::Char('S') if app.focus == Focus::Reminders => {
+            app.focus_snooze_selected_reminder();
         }
         KeyCode::Char('D') if app.focus == Focus::Workflows => {
             app.request_confirm(ConfirmAction::DeleteWorkflow);
@@ -1070,6 +1091,7 @@ async fn handle_key(
         KeyCode::Backspace if app.focus == Focus::WorkflowEdit => app.workflow_yaml_pop(),
         KeyCode::Backspace if app.focus == Focus::WorkflowInputs => app.workflow_inputs_pop(),
         KeyCode::Backspace if app.focus == Focus::WorkflowApproval => app.workflow_approval_pop(),
+        KeyCode::Backspace if app.focus == Focus::ReminderCreate => app.reminder_note_pop(),
         KeyCode::Backspace if app.focus == Focus::RepoCreate => app.repo_input_pop(),
         KeyCode::Backspace if app.focus == Focus::RepoIssueCreate => app.repo_issue_input_pop(),
         KeyCode::Backspace if app.focus == Focus::RepoPatchCreate => app.repo_patch_input_pop(),
@@ -1109,6 +1131,7 @@ async fn handle_key(
         KeyCode::Char(ch) if app.focus == Focus::WorkflowApproval => {
             app.workflow_approval_push(ch);
         }
+        KeyCode::Char(ch) if app.focus == Focus::ReminderCreate => app.reminder_note_push(ch),
         KeyCode::Char(ch) if app.focus == Focus::RepoCreate => app.repo_input_push(ch),
         KeyCode::Char(ch) if app.focus == Focus::RepoIssueCreate => {
             app.repo_issue_input_push(ch);
@@ -1187,6 +1210,7 @@ fn is_text_input_focus(focus: Focus) -> bool {
             | Focus::WorkflowEdit
             | Focus::WorkflowInputs
             | Focus::WorkflowApproval
+            | Focus::ReminderCreate
             | Focus::CommandPalette
     )
 }

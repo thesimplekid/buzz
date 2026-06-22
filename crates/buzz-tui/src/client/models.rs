@@ -248,6 +248,47 @@ pub struct ReadState {
     pub contexts: BTreeMap<String, u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReminderStatus {
+    Pending,
+    Done,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReminderTarget {
+    pub event_id: String,
+    pub channel_id: String,
+    pub preview: String,
+    pub author_pubkey: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReminderContent {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<ReminderTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    pub status: ReminderStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Reminder {
+    pub id: String,
+    pub not_before: Option<u64>,
+    pub content: ReminderContent,
+    pub created_at: u64,
+    pub event_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReminderGroup {
+    pub label: &'static str,
+    pub reminders: Vec<Reminder>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChannelSection {
     pub id: String,
