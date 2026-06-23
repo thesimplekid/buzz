@@ -8,6 +8,7 @@ members = [
     "crates/buzz-search",
     "crates/buzz-audit",
     "crates/buzz-acp",
+    "crates/buzz-acp-sandbox",
     "crates/buzz-agent",
     "crates/sprig",
     "crates/buzz-proxy",
