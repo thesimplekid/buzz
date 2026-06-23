@@ -568,20 +568,44 @@ fn stop_agent(agent: &mut AgentProcess) {
 
 async fn shutdown_agent(agent: &mut AgentProcess) {
     if let Some(mut child) = agent.child.take() {
-        kill_child_tree(&mut child);
-        match tokio::time::timeout(AGENT_STOP_TIMEOUT, child.wait()).await {
-            Ok(Ok(_)) => {
-                agent.last_exit = Some("stopped by user".to_string());
-            }
+        terminate_child_tree(&mut child);
+        let stopped = match tokio::time::timeout(AGENT_STOP_TIMEOUT, child.wait()).await {
+            Ok(Ok(_)) => true,
             Ok(Err(error)) => {
                 agent.last_exit = Some(format!("stop wait failed: {error}"));
+                true
             }
-            Err(_) => {
-                agent.last_exit = Some("stop wait timed out".to_string());
+            Err(_) => false,
+        };
+        if stopped {
+            agent
+                .last_exit
+                .get_or_insert_with(|| "stopped by user".to_string());
+        } else {
+            kill_child_tree(&mut child);
+            match tokio::time::timeout(AGENT_STOP_TIMEOUT, child.wait()).await {
+                Ok(Ok(_)) => {
+                    agent.last_exit = Some("stopped by user".to_string());
+                }
+                Ok(Err(error)) => {
+                    agent.last_exit = Some(format!("stop wait failed after kill: {error}"));
+                }
+                Err(_) => {
+                    agent.last_exit = Some("stop wait timed out".to_string());
+                }
             }
         }
     }
     agent.status = AgentStatus::Stopped;
+}
+
+fn terminate_child_tree(child: &mut Child) {
+    match child.id() {
+        Some(pid) if terminate_process_group(pid) => {}
+        _ => {
+            let _ = child.start_kill();
+        }
+    }
 }
 
 fn kill_child_tree(child: &mut Child) {
@@ -594,11 +618,26 @@ fn kill_child_tree(child: &mut Child) {
 }
 
 #[cfg(unix)]
+fn terminate_process_group(pid: u32) -> bool {
+    signal_process_group(pid, nix::sys::signal::Signal::SIGTERM)
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn kill_process_group(pid: u32) -> bool {
-    use nix::sys::signal::{killpg, Signal};
+    signal_process_group(pid, nix::sys::signal::Signal::SIGKILL)
+}
+
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: nix::sys::signal::Signal) -> bool {
+    use nix::sys::signal::killpg;
     use nix::unistd::Pid;
 
-    killpg(Pid::from_raw(pid as i32), Signal::SIGKILL).is_ok()
+    killpg(Pid::from_raw(pid as i32), signal).is_ok()
 }
 
 #[cfg(not(unix))]
@@ -1141,6 +1180,86 @@ mod tests {
         }
 
         panic!("descendant process should not still be running");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_agent_allows_sigterm_cleanup_before_kill() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "buzz-tui-shutdown-child-{}-{}.pid",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        let script = r#"
+            cleanup() {
+                kill -KILL "-$child" 2>/dev/null || kill -KILL "$child" 2>/dev/null || true
+                wait "$child" 2>/dev/null || true
+                exit 0
+            }
+            trap cleanup TERM
+            setsid sleep 30 &
+            child=$!
+            printf '%s\n' "$child" > "$PID_FILE"
+            while :; do sleep 1; done
+        "#;
+        let mut command = Command::new("bash");
+        command
+            .arg("-c")
+            .arg(script)
+            .env("PID_FILE", &pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+
+        let child = command.spawn().expect("spawn fake acp");
+        let descendant_pid = read_pid_file(&pid_file).await;
+        assert!(
+            process_is_running(descendant_pid),
+            "separate process-group child should be running before shutdown"
+        );
+
+        let mut agent = AgentProcess {
+            runtime: fallback_runtimes()
+                .into_iter()
+                .next()
+                .expect("fallback runtime"),
+            status: AgentStatus::Running,
+            last_exit: None,
+            child: Some(child),
+        };
+        shutdown_agent(&mut agent).await;
+
+        let deadline = tokio::time::Instant::now() + AGENT_STOP_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            if !process_is_running(descendant_pid) {
+                let _ = std::fs::remove_file(&pid_file);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        panic!("separate process-group child should not still be running");
+    }
+
+    #[cfg(unix)]
+    async fn read_pid_file(path: &std::path::Path) -> i32 {
+        let deadline = tokio::time::Instant::now() + AGENT_STOP_TIMEOUT;
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if let Ok(pid) = contents.trim().parse() {
+                    return pid;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("timed out waiting for pid file {}", path.display());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     #[cfg(all(unix, target_os = "linux"))]

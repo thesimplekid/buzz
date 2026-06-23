@@ -150,9 +150,17 @@ async fn main() -> anyhow::Result<()> {
         workspace_config,
         workspace_store_path,
     });
+    let shutdown_rx = install_shutdown_signal_handler();
 
     install_terminal()?;
-    let result = run_app(&mut app, &session_config, args.refresh_interval).await;
+    let result = run_app(
+        &mut app,
+        &session_config,
+        args.refresh_interval,
+        shutdown_rx,
+    )
+    .await;
+    app.shutdown_all_agents().await;
     restore_terminal()?;
 
     if let Err(err) = result {
@@ -309,6 +317,7 @@ async fn run_app(
     app: &mut App,
     session_config: &SessionConfig,
     refresh_interval_secs: u64,
+    mut shutdown_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 ) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -330,6 +339,11 @@ async fn run_app(
     let mut completed_reaction_hydrate_id: Option<String> = None;
 
     while !app.should_quit {
+        if shutdown_rx.try_recv().is_ok() {
+            app.quit();
+            continue;
+        }
+
         live.sync_active_channel(app.active_live_channel_target());
         while let Ok(event) = live_rx.try_recv() {
             apply_live_event(app, event, &mut refresh);
@@ -393,11 +407,45 @@ async fn run_app(
         }
     }
 
-    app.shutdown_all_agents().await;
     live.stop();
     refresh.stop();
     terminal.clear()?;
     Ok(())
+}
+
+fn install_shutdown_signal_handler() -> tokio::sync::mpsc::UnboundedReceiver<()> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let ctrl_c_tx = tx.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = ctrl_c_tx.send(());
+        }
+    });
+
+    #[cfg(unix)]
+    {
+        let terminate_tx = tx.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+
+            if let Ok(mut sigterm) = signal(SignalKind::terminate()) {
+                sigterm.recv().await;
+                let _ = terminate_tx.send(());
+            }
+        });
+
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+
+            if let Ok(mut sighup) = signal(SignalKind::hangup()) {
+                sighup.recv().await;
+                let _ = tx.send(());
+            }
+        });
+    }
+
+    rx
 }
 
 fn apply_live_event(app: &mut App, event: LiveEvent, refresh: &mut RefreshRuntime) {
