@@ -1,0 +1,18 @@
+[package]
+name = "buzz-acp-sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optional Linux Bubblewrap sidecar for running buzz-acp in a per-agent sandbox"
+
+[lib]
+name = "buzz_acp_sandbox"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-acp-sandbox"
+path = "src/main.rs"
+
+[dependencies]
