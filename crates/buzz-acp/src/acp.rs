@@ -116,7 +116,7 @@ pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
     /// Write end of the agent's stdin pipe.
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
@@ -159,22 +159,26 @@ impl AcpClient {
     /// Call this when you need guaranteed cleanup — e.g., in `run_models`
     /// before process exit.
     pub async fn shutdown(&mut self) {
-        // Kill the entire process group when possible. The child was spawned
-        // with process_group(0), so its PID == its PGID. Killing the group
-        // ensures subprocesses (MCP servers, tool processes) are cleaned up
-        // rather than orphaned to init.
-        //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
+        // Prefer a protocol-level shutdown: closing stdin makes buzz-agent's
+        // read loop exit normally, which drops MCP registries and kills MCP
+        // servers that run in their own process groups. A direct SIGKILL of
+        // the agent would skip those drop handlers and can orphan dev-mcp.
+        drop(self.stdin.take());
+
+        match tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait()).await {
+            Ok(Ok(_)) => return,
+            Ok(Err(e)) => tracing::debug!("child wait error after stdin close: {e}"),
+            Err(_) => tracing::warn!("child did not exit within 5s after stdin close; killing"),
+        }
+
+        // Hard fallback for wedged agents. The child was spawned with
+        // process_group(0), so its PID == its PGID.
         match self.child.id() {
             Some(pid) if kill_process_group(pid) => {}
             _ => {
                 let _ = self.child.start_kill();
             }
         }
-        // Bounded wait: if the child doesn't exit within 5s after SIGKILL,
-        // give up and let Drop/OS handle it. An unbounded wait here would
-        // wedge the harness during respawn or shutdown if a child is stuck.
         match tokio::time::timeout(std::time::Duration::from_secs(5), self.child.wait()).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
@@ -229,7 +233,7 @@ impl AcpClient {
 
         Ok(Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
             pending_permission_id: None,
@@ -578,9 +582,12 @@ impl AcpClient {
         const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let line = serde_json::to_string(value)?;
         tokio::time::timeout(WRITE_TIMEOUT, async {
-            self.stdin.write_all(line.as_bytes()).await?;
-            self.stdin.write_all(b"\n").await?;
-            self.stdin.flush().await?;
+            let stdin = self.stdin.as_mut().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent stdin closed")
+            })?;
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
             Ok::<(), std::io::Error>(())
         })
         .await
@@ -1813,6 +1820,56 @@ mod tests {
             .expect("failed to spawn test script")
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_closes_stdin_so_agent_cleans_up_separate_process_group_child() {
+        let pid_file = std::env::temp_dir().join(format!(
+            "buzz-acp-shutdown-child-{}-{}.pid",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        let script = r#"
+            setsid sleep 30 &
+            child=$!
+            printf '%s\n' "$child" > "$PID_FILE"
+            cat >/dev/null
+            kill -KILL "-$child" 2>/dev/null || kill -KILL "$child" 2>/dev/null || true
+            wait "$child" 2>/dev/null || true
+        "#;
+        let mut client = AcpClient::spawn(
+            "bash",
+            &["-c".into(), script.into()],
+            &[(
+                "PID_FILE".to_string(),
+                pid_file.to_string_lossy().to_string(),
+            )],
+        )
+        .await
+        .expect("failed to spawn test script");
+
+        let child_pid = read_pid_file(&pid_file).await;
+        assert!(
+            process_is_running(child_pid),
+            "test child should be running before shutdown"
+        );
+
+        client.shutdown().await;
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if !process_is_running(child_pid) {
+                let _ = std::fs::remove_file(&pid_file);
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        panic!("separate process-group child should not still be running");
+    }
+
     #[tokio::test]
     async fn idle_timeout_fires_on_silent_process() {
         let mut client = spawn_script("sleep 10").await;
@@ -1975,6 +2032,30 @@ mod tests {
             .await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
+    }
+
+    #[cfg(unix)]
+    async fn read_pid_file(path: &std::path::Path) -> i32 {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if let Ok(pid) = contents.trim().parse() {
+                    return pid;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("timed out waiting for pid file {}", path.display());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    fn process_is_running(pid: i32) -> bool {
+        use nix::sys::signal;
+        use nix::unistd::Pid;
+
+        signal::kill(Pid::from_raw(pid), None).is_ok()
     }
 
     // ── Keepalive / tool-call idle reset tests (PR #935 fix) ─────────────
