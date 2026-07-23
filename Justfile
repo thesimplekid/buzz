@@ -502,7 +502,9 @@ dev *ARGS:
 desktop-standalone *ARGS: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
-    export PATH="{{justfile_directory()}}/bin:$PATH"
+    if [[ -z "${IN_NIX_SHELL:-}" ]]; then
+        export PATH="{{justfile_directory()}}/bin:$PATH"
+    fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
@@ -525,6 +527,10 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
     pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+
+# Run the standalone desktop app with all Linux/Tauri dependencies supplied by Nix.
+desktop-nix *ARGS:
+    nix develop .#desktop --command just desktop-standalone {{ARGS}}
 
 # Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
 staging *ARGS:

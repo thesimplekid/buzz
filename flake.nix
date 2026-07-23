@@ -389,6 +389,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
           packages = self.packages.${system};
+          desktopDevShell = import ./nix/desktop-dev-shell.nix { inherit pkgs; };
           basePackages = with pkgs; [
             cargo
             rustc
@@ -445,6 +446,17 @@
             shellHook = ''
               ${runtimeShellHook}
               echo "Buzz agent shell: buzz-acp and agent adapters available"
+            '';
+          };
+
+          desktop = pkgs.mkShell {
+            packages = basePackages ++ desktopDevShell.packages;
+            inherit (desktopDevShell) nativeBuildInputs buildInputs;
+
+            shellHook = ''
+              ${commonShellHook}
+              ${desktopDevShell.shellHook}
+              echo "Buzz desktop shell: use 'just desktop-standalone' to launch the Tauri app."
             '';
           };
         });
