@@ -8,7 +8,7 @@ Implementation in progress.
 - [x] Phase 1: scaffold `buzz-client`
 - [x] Phase 2: HTTP query, count, and pagination
 - [x] Phase 3: event submission, WebSocket, and media
-- [ ] Phase 4: migrate `buzz-cli`
+- [x] Phase 4: migrate `buzz-cli`
 - [ ] Phase 5: rebase and migrate `buzz-tui`
 - [ ] Phase 6: external-consumer hardening
 - [ ] Phase 7: extract `buzz-tui` as a standalone project
@@ -583,15 +583,15 @@ CLI contract.
 
 ### Work
 
-1. Add `buzz-client` as a dependency of `buzz-cli`.
-2. Replace the private CLI transport implementation in vertical slices:
-   1. client construction and credentials;
-   2. query and count;
-   3. pagination;
-   4. stored event submission;
-   5. ephemeral WebSocket publication;
-   6. media upload/download.
-3. Keep in `buzz-cli`:
+- [x] Add `buzz-client` as a dependency of `buzz-cli`.
+- [x] Replace the private CLI transport implementation in vertical slices:
+   - [x] client construction and credentials;
+   - [x] query and count;
+   - [x] pagination;
+   - [x] stored event submission;
+   - [x] ephemeral WebSocket publication;
+   - [x] media upload/download.
+- [x] Keep in `buzz-cli`:
    - argument parsing;
    - command dispatch;
    - feature-specific filter and event construction;
@@ -599,11 +599,11 @@ CLI contract.
    - stdout/stderr formatting;
    - exit-code mapping;
    - CLI environment-variable semantics.
-4. Add a conversion from `buzz_client::ClientError` to the existing CLI error
+- [x] Add a conversion from `buzz_client::ClientError` to the existing CLI error
    categories.
-5. Remove old private helpers only after the corresponding command tests use
+- [x] Remove old private helpers only after the corresponding command tests use
    the shared implementation.
-6. Do not combine the migration with unrelated command refactoring.
+- [x] Do not combine the migration with unrelated command refactoring.
 
 ### Compatibility tests
 
@@ -634,6 +634,12 @@ cargo clippy -p buzz-client -p buzz-cli --all-targets -- -D warnings
 - Its public behavior remains unchanged.
 - The shared client has a real consumer independent of the TUI.
 - No `desktop/` path is modified.
+
+Verified on 2026-07-25 with all three commands above. The combined test run
+passed 227 CLI unit tests, 43 shared-client unit/integration tests, and both
+crates' doc tests. The CLI wrapper retains product policy and output/error
+adaptation, but no longer owns an HTTP client, relay URL normalization, NIP-98
+signing, retry loops, WebSocket wire handling, or media transport.
 
 ## Phase 5: Rebase and Migrate `buzz-tui`
 

@@ -14,6 +14,10 @@ pub enum CliError {
     #[error("network error: {}", fmt_reqwest_error(.0))]
     Network(#[from] reqwest::Error),
 
+    /// A shared client operation exceeded its configured deadline.
+    #[error("network error: operation timed out")]
+    Timeout,
+
     /// Auth missing or rejected (401/403)
     #[error("auth error: {0}")]
     Auth(String),
@@ -78,6 +82,7 @@ pub fn is_retryable_error(e: &CliError) -> bool {
                 || net_err.is_body()
                 || net_err.is_decode()
         }
+        CliError::Timeout => true,
         CliError::Relay { status, .. } => matches!(status, 429 | 502 | 503 | 504),
         CliError::DeliveryUnknown(_) => false,
         _ => false,
@@ -98,6 +103,7 @@ pub fn exit_code(e: &CliError) -> i32 {
             }
         }
         CliError::Network(_) => 2,
+        CliError::Timeout => 2,
         CliError::Auth(_) => 3,
         CliError::Key(_) => 3,
         CliError::Conflict(_) => 5,
@@ -120,6 +126,7 @@ pub fn print_error(e: &CliError) {
             }
         }
         CliError::Network(_) => "network_error",
+        CliError::Timeout => "network_error",
         CliError::Auth(_) => "auth_error",
         CliError::Key(_) => "key_error",
         CliError::Conflict(_) => "conflict",
@@ -135,6 +142,43 @@ pub fn print_error(e: &CliError) {
     eprintln!("{}", obj);
 }
 
+impl From<buzz_client::ClientError> for CliError {
+    fn from(error: buzz_client::ClientError) -> Self {
+        match error {
+            buzz_client::ClientError::InvalidUrl(message)
+            | buzz_client::ClientError::InvalidMedia(message) => Self::Usage(message),
+            buzz_client::ClientError::InvalidKey(message) => Self::Key(message),
+            buzz_client::ClientError::InvalidAuthTag(message) => Self::Auth(message),
+            buzz_client::ClientError::Signing(message)
+            | buzz_client::ClientError::Protocol(message) => Self::Other(message),
+            buzz_client::ClientError::Network(error) => Self::Network(error),
+            buzz_client::ClientError::WebSocket(error) => Self::Other(error.to_string()),
+            buzz_client::ClientError::Relay {
+                status, message, ..
+            } => {
+                let body = if status == 403 && std::env::var("BUZZ_AUTH_TAG").is_ok() {
+                    format!(
+                        "{message} (BUZZ_AUTH_TAG is set — it may be stale or revoked; \
+                         try unsetting it)"
+                    )
+                } else {
+                    message
+                };
+                Self::Relay { status, body }
+            }
+            buzz_client::ClientError::Rejected { message, .. } => Self::Relay {
+                status: 400,
+                body: message,
+            },
+            buzz_client::ClientError::Serialization(error) => Self::Other(error.to_string()),
+            buzz_client::ClientError::Timeout => Self::Timeout,
+            buzz_client::ClientError::DeliveryUnknown { event_id, reason } => {
+                Self::DeliveryUnknown(format!("event {event_id}: {reason}"))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,7 +190,7 @@ mod tests {
         // A bad URL produces a builder-level reqwest::Error (is_builder() == true).
         // Builder errors are not transport failures — not retryable.
         // Transport errors (is_connect/timeout/request) require live I/O to construct;
-        // the predicate here mirrors with_retry's condition exactly.
+        // the predicate mirrors the shared client's transient-error classification.
         let e = reqwest::Client::new().get("not-a-url").build().unwrap_err();
         assert!(e.is_builder(), "expected a builder error from bad URL");
         assert!(!is_retryable_error(&CliError::Network(e)));

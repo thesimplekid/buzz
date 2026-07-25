@@ -884,11 +884,10 @@ name = "buzz-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64",
+ "buzz-client",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
- "buzz-ws-client",
  "bytes",
  "chrono",
  "clap",
@@ -897,7 +896,6 @@ dependencies = [
  "hex",
  "infer",
  "nostr",
- "rand 0.10.1",
  "reqwest 0.13.4",
  "rustls",
  "serde",
@@ -906,7 +904,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "url",
  "uuid",
 ]
 
