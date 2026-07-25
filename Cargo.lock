@@ -1008,6 +1008,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "buzz-core",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "bytes",
+ "futures-util",
+ "hex",
+ "nostr 0.44.7",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-conformance"
 version = "0.1.0"
 dependencies = [
@@ -1186,6 +1210,23 @@ dependencies = [
  "futures-util",
  "hex",
  "nostr 0.44.7",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "buzz-pairing-client"
+version = "0.1.0"
+dependencies = [
+ "buzz-core",
+ "buzz-pair-relay",
+ "futures-util",
+ "nostr 0.44.7",
+ "reqwest 0.13.4",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
