@@ -1,0 +1,59 @@
+[package]
+name = "buzz-tui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88.0"
+license = "Apache-2.0"
+repository = "https://github.com/block/buzz-tui"
+description = "Ratatui terminal client for Buzz"
+readme = "README.md"
+
+[workspace]
+
+[[bin]]
+name = "buzz-tui"
+path = "src/main.rs"
+
+[features]
+default = ["system-keyring"]
+# OS keyring backing for managed-agent private keys. Disable for headless
+# environments without a secret service; keys then stay in the JSON store.
+system-keyring = ["dep:keyring"]
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+buzz-client = { git = "https://github.com/block/buzz", rev = "753bc22f42bbed8b7f3ea0c1d8e572bd8f5e4dfd" }
+buzz-core = { git = "https://github.com/block/buzz", rev = "753bc22f42bbed8b7f3ea0c1d8e572bd8f5e4dfd" }
+buzz-pairing-client = { git = "https://github.com/block/buzz", rev = "753bc22f42bbed8b7f3ea0c1d8e572bd8f5e4dfd" }
+buzz-sdk = { git = "https://github.com/block/buzz", rev = "753bc22f42bbed8b7f3ea0c1d8e572bd8f5e4dfd" }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+crossterm = "0.29"
+diffy = "0.5"
+hex = "0.4"
+infer = "0.19"
+nostr = { version = "0.44", features = ["nip44", "nip98"] }
+qrcode = { version = "0.14", default-features = false }
+rand = "0.10"
+ratatui = { version = "0.30.1", default-features = false, features = ["crossterm_0_29"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "process", "rt-multi-thread", "macros", "signal", "sync", "time"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zeroize = "1.8"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "vendored"], optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
