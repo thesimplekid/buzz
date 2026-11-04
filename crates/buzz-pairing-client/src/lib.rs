@@ -91,8 +91,13 @@ pub enum PairingCommand {
 pub enum PairingEvent {
     /// The relay subscription is registered and the URI is ready to scan.
     Ready { uri: PairingUri },
-    /// Mobile sent a valid offer and both devices can compare this SAS.
+    /// Mobile sent a valid legacy offer and both devices can compare this SAS.
     SasReceived { code: String },
+    /// The target requested code-entry confirmation (`desktop-code-v1`):
+    /// display this six-digit code locally so its user can type it in. Only a
+    /// matching submission releases the source proof and identity payload;
+    /// [`PairingCommand::ConfirmSas`] is ignored for the rest of the session.
+    CodeEntryRequested { code: String },
     /// Mobile imported and validated the transferred credentials.
     Complete,
     /// The peer or local user aborted the session.
@@ -270,6 +275,9 @@ async fn run_source(
     let timeout = tokio::time::sleep(SESSION_TIMEOUT);
     tokio::pin!(timeout);
     let mut payload = Some(payload);
+    // Set when the target's offer requests code-entry confirmation; the
+    // identity is then released only by a matching code submission.
+    let mut code_entry = false;
 
     loop {
         tokio::select! {
@@ -287,7 +295,8 @@ async fn run_source(
                         return Ok(());
                     }
                     Some(PairingCommand::ConfirmSas) => {
-                        if session.state() != SessionState::Confirming {
+                        // A manual confirm must never bypass the pending code.
+                        if code_entry || session.state() != SessionState::Confirming {
                             continue;
                         }
                         let confirm = session.confirm_sas()?;
@@ -318,9 +327,44 @@ async fn run_source(
                     });
                     return Ok(());
                 }
-                if let Ok(code) = session.handle_offer(&event) {
-                    let _ = event_tx.send(PairingEvent::SasReceived { code });
+                if let Ok((sas, target_code_entry)) =
+                    session.handle_offer_with_confirmation(&event)
+                {
+                    code_entry = target_code_entry;
+                    if code_entry {
+                        let (code, challenge) = session.start_desktop_code()?;
+                        publish_event(&mut write, &challenge).await?;
+                        let _ = event_tx.send(PairingEvent::CodeEntryRequested { code });
+                    } else {
+                        let _ = event_tx.send(PairingEvent::SasReceived { code: sas });
+                    }
                     continue;
+                }
+                if code_entry {
+                    match session.handle_target_code(&event) {
+                        Ok((response, false)) => {
+                            publish_event(&mut write, &response).await?;
+                            if session.state() == SessionState::Aborted {
+                                let _ = event_tx.send(PairingEvent::Aborted {
+                                    reason: "too many incorrect codes".to_string(),
+                                });
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        Ok((proof, true)) => {
+                            publish_event(&mut write, &proof).await?;
+                            if let Some(payload) = payload.take() {
+                                let event = session.send_payload(PayloadType::Custom, payload)?;
+                                publish_event(&mut write, &event).await?;
+                            }
+                            continue;
+                        }
+                        Err(PairingError::TranscriptMismatch) => {
+                            return Err(RunError::Protocol(PairingError::TranscriptMismatch));
+                        }
+                        Err(_) => {}
+                    }
                 }
                 match session.handle_complete(&event) {
                     Ok(()) => {
